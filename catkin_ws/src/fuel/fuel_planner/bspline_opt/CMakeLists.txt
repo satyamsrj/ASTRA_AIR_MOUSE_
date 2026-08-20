@@ -9,8 +9,15 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall")
 find_package(Eigen3 REQUIRED)
 find_package(PCL 1.7 REQUIRED)
 
-set(NLOPT_INCLUDE_DIR "/usr/local/include")  
-set(NLOPT_LIBRARY "/usr/local/lib/libnlopt.so")  
+find_path(NLOPT_INCLUDE_DIR NAMES nlopt.hpp
+  PATHS /usr/local/include /usr/include)
+find_library(NLOPT_LIBRARY NAMES nlopt
+  PATHS /usr/local/lib /usr/lib /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/local/lib64)
+
+if(NOT NLOPT_INCLUDE_DIR OR NOT NLOPT_LIBRARY)
+  message(FATAL_ERROR "NLopt not found (need nlopt.hpp and libnlopt.so). "
+    "Install libnlopt-dev and libnlopt-cxx-dev (see docker/Dockerfile) and re-run catkin build.")
+endif()
 
 find_package(catkin REQUIRED COMPONENTS
   roscpp
