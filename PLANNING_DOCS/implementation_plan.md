@@ -1,3 +1,9 @@
+> **STATUS NOTE (2026-09-04):** An external audit
+> (`PLANNING_DOCS/nidar_phase_plan_to_mission_complete.md`) found this plan references files that do
+> not exist in the current tree, including `ARENA/tomar.dae`. Treat item statuses below as proposed
+> work, not confirmed state — verify against the actual repo (`git ls-files`) before relying on any
+> "done" claim here. See that audit's §1.4/§14 for the full list of what's actually missing.
+
 # Implementation Plan — NIDAR AirMouse Autonomous Indoor Exploration (Approved & Updated)
 
 This implementation plan defines the phase-wise execution roadmap for the **NIDAR AirMouse** autonomous UAV project in a GPS-denied indoor environment, incorporating user requirements and feedback.

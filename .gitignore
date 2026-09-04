@@ -36,3 +36,7 @@ host_test.txt
 /ros_workspace.tar.gz
 
 
+
+# Claude Code graphify analysis cache - regenerable, never commit
+graphify-out/
+graphify/

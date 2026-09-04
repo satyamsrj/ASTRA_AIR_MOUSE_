@@ -1,4 +1,21 @@
-<?xml version="1.0" ?>
+<?xml version="1.0"?>
+<!--
+  NOT THE FILE GAZEBO SPAWNS. Every entry point (scripts/test_takeoff.sh, test_square_flight.sh,
+  run_obstacle_test.sh, run_sim.sh) launches `px4 mavros_posix_sitl.launch vehicle:=iris_vlp16`
+  without an `sdf:=` argument, so the spawned model resolves through that launch file's default,
+  $(find mavlink_sitl_gazebo)/models/iris_vlp16/iris_vlp16.sdf, i.e.
+  simulation/PX4-Autopilot-v1.14.3/Tools/simulation/gazebo-classic/sitl_gazebo-classic/models/
+  iris_vlp16/iris_vlp16.sdf. Edit THAT file. This copy is loaded by nothing.
+
+  It has also drifted: it declares its own <plugin name="mavlink_interface"> while also including
+  model://iris, which already carries one, so spawning this copy would bind two MAVLink interfaces
+  to the same ports.
+
+  Kept in sync with the real model where cheap, but treat the sitl_gazebo-classic copy as the
+  source of truth. Editing this file instead is what silently produced a drone that armed, logged
+  "Takeoff detected" and never climbed on 2026-09-04: the TFmini went into this copy, so no
+  rangefinder ever spawned.
+-->
 <sdf version="1.5">
   <model name="iris_vlp16">
     <!-- Include the base Iris quadrotor -->
@@ -99,7 +116,23 @@
       <parent>iris::base_link</parent>
       <child>velodyne_link</child>
     </joint>
-  
+
+    <!-- TFmini Plus downward rangefinder. Included as a nested model (not an inline link like
+         velodyne_link above) because gazebo_mavlink_interface only auto-discovers distance
+         sensors among nested models, matching their name against `.*(lidar|sf10a)(.*)`. An inline
+         link would publish to ROS fine but PX4 would never receive DISTANCE_SENSOR, silently
+         breaking EKF2_HGT_REF=2. Pattern copied from the stock iris_opt_flow.sdf:25-34.
+         See PLANNING_DOCS/fixed_altitude_2d_flight_architecture_2026-09-03.md Sec 15. -->
+    <include>
+      <uri>model://tfmini_lidar</uri>
+      <pose>0 0 -0.05 0 0 0</pose>
+    </include>
+
+    <joint name="tfmini_lidar_joint" type="fixed">
+      <parent>iris::base_link</parent>
+      <child>tfmini_lidar::link</child>
+    </joint>
+
     <plugin name="mavlink_interface" filename="libgazebo_mavlink_interface.so">
       <robotNamespace/>
       <imuSubTopic>/imu</imuSubTopic>

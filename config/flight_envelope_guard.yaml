@@ -9,16 +9,27 @@ flight_envelope_guard:
   world_x_max: 7.0
   world_y_min: -7.0
   world_y_max: 7.0
-  world_z_min: 0.3
-  world_z_max: 2.0
+  # Fixed-altitude 2D flight (2026-09-03): reverted to the original pre-3D-exploration band --
+  # traj_server.cpp now hard-pins every published Z to 1.4 (camera_init)/1.5 (world), so this is a
+  # defensive check against that pin ever being bypassed, not the primary altitude mechanism.
+  # See PLANNING_DOCS/fixed_altitude_2d_flight_architecture_2026-09-03.md Sec 6.1.
+  world_z_min: 1.45
+  world_z_max: 1.55
 
   # camera_init frame bounds are derived at runtime from world bounds
   # via world_to_camera() — no separate config needed
 
   # Safety Margin & Rate
   boundary_margin: 0.2
-  boundary_margin_z: 0.2
+  # boundary_margin_z re-derived for the 0.1m band above -- the old 0.2 was sized against the
+  # previous 1.7m-tall band and would invert this one to an empty range (eff_min > eff_max).
+  # 0.03 is a starting, defensive value pending live-tuning against the vehicle's actual
+  # MPC_Z_VEL_MAX_UP/_DN behavior -- see Sec 6.2 of the doc above.
+  boundary_margin_z: 0.03
   publish_rate: 20.0
   default_altitude: 1.5
   max_yaw_rate: 1.5
   vision_timeout: 1.0
+  # Range-staleness watchdog (mirrors vision_timeout above) -- required now that TFmini is PX4's
+  # sole height reference (EKF2_HGT_REF=2, no automatic Vision fallback inside PX4 for height).
+  range_timeout: 1.0

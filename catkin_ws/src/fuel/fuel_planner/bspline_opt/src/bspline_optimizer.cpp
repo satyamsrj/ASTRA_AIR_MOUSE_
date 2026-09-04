@@ -16,11 +16,17 @@ const int BsplineOptimizer::GUIDE = (1 << 5);
 const int BsplineOptimizer::WAYPOINTS = (1 << 6);
 const int BsplineOptimizer::VIEWCONS = (1 << 7);
 const int BsplineOptimizer::MINTIME = (1 << 8);
+const int BsplineOptimizer::ALTITUDE = (1 << 9);
 
 const int BsplineOptimizer::GUIDE_PHASE = BsplineOptimizer::SMOOTHNESS | BsplineOptimizer::GUIDE |
     BsplineOptimizer::START | BsplineOptimizer::END;
+// Fixed-altitude 2D flight: ALTITUDE added to NORMAL_PHASE (not touched at individual call
+// sites) so every position-trajectory optimize() call in planner_manager.cpp picks it up
+// automatically -- yaw-trajectory optimization uses its own separate cost_func bitmasks and is
+// unaffected. See PLANNING_DOCS/fixed_altitude_2d_flight_architecture_2026-09-03.md Sec 5.
 const int BsplineOptimizer::NORMAL_PHASE = BsplineOptimizer::SMOOTHNESS | BsplineOptimizer::DISTANCE |
-    BsplineOptimizer::FEASIBILITY | BsplineOptimizer::START | BsplineOptimizer::END;
+    BsplineOptimizer::FEASIBILITY | BsplineOptimizer::START | BsplineOptimizer::END |
+    BsplineOptimizer::ALTITUDE;
 
 void BsplineOptimizer::setParam(ros::NodeHandle& nh) {
   nh.param("optimization/ld_smooth", ld_smooth_, -1.0);
@@ -32,6 +38,8 @@ void BsplineOptimizer::setParam(ros::NodeHandle& nh) {
   nh.param("optimization/ld_waypt", ld_waypt_, -1.0);
   nh.param("optimization/ld_view", ld_view_, -1.0);
   nh.param("optimization/ld_time", ld_time_, -1.0);
+  nh.param("optimization/ld_alt", ld_alt_, -1.0);
+  nh.param("optimization/z_cruise", z_cruise_, 1.4);
 
   nh.param("optimization/dist0", dist0_, -1.0);
   nh.param("optimization/max_vel", max_vel_, -1.0);
@@ -151,6 +159,7 @@ void BsplineOptimizer::optimize(Eigen::MatrixXd& points, double& dt, const int& 
   g_waypoints_.resize(point_num_);
   g_view_.resize(point_num_);
   g_time_.resize(point_num_);
+  g_altitude_.resize(point_num_);
 
   comb_time = 0.0;
 
@@ -302,6 +311,24 @@ void BsplineOptimizer::calcDistanceCost(const vector<Eigen::Vector3d>& q, double
       cost += pow(dist - dist0_, 2);
       gradient_q[i] += 2.0 * (dist - dist0_) * dist_grad;
     }
+  }
+}
+
+/* Fixed-altitude 2D flight: quadratic pull of every control point's Z toward z_cruise_, the same
+ * structural pattern as every other cost term here (quadratic penalty + analytic gradient). This
+ * is what makes "stay near cruise altitude" part of the optimizer's actual objective instead of
+ * only a candidate-endpoint clamp or a repulsive obstacle it can trade away. See
+ * PLANNING_DOCS/fixed_altitude_2d_flight_architecture_2026-09-03.md Sec 5. */
+void BsplineOptimizer::calcAltitudeCost(const vector<Eigen::Vector3d>& q, double& cost,
+                                        vector<Eigen::Vector3d>& gradient_q) {
+  cost = 0.0;
+  Eigen::Vector3d zero(0, 0, 0);
+  std::fill(gradient_q.begin(), gradient_q.end(), zero);
+
+  for (int i = 0; i < q.size(); i++) {
+    double dz = q[i](2) - z_cruise_;
+    cost += dz * dz;
+    gradient_q[i](2) += 2.0 * dz;
   }
 }
 
@@ -584,6 +611,14 @@ void BsplineOptimizer::combineCost(const std::vector<double>& x, std::vector<dou
     for (int i = 0; i < point_num_; i++)
       for (int j = 0; j < dim_; j++)
         grad[dim_ * i + j] += ld_dist_ * g_distance_[i](j);
+  }
+  if (cost_function_ & ALTITUDE) {
+    double f_altitude = 0.0;
+    calcAltitudeCost(g_q_, f_altitude, g_altitude_);
+    f_combine += ld_alt_ * f_altitude;
+    for (int i = 0; i < point_num_; i++)
+      for (int j = 0; j < dim_; j++)
+        grad[dim_ * i + j] += ld_alt_ * g_altitude_[i](j);
   }
   if (cost_function_ & FEASIBILITY) {
     double f_feasibility = 0.0, gt_feasibility = 0.0;

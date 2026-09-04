@@ -74,30 +74,49 @@ source devel/setup.bash && cd ~/NIDAR
 
 ## Repository Structure
 
+Regenerated 2026-09-04 from the actual runtime call graph of `scripts/test_takeoff.sh`, not from
+directory listings. Every path below is loaded or executed by a live run; see
+`PLANNING_DOCS/repo_cleanup_and_mind_map_2026-09-03.md` for the full trace.
+
 ```directory
 NIDAR/
-├── docker/                        # Docker environment definition for reproducible onboarding
-│   └── Dockerfile                 # Full Ubuntu 20.04 + ROS Noetic + MAVROS + Livox-SDK + FUEL toolchain
-├── catkin_ws/                     # Active ROS Workspace (built inside Docker)
-│   └── src/
-│       ├── FAST_LIO/              # Real-time LiDAR-inertial SLAM odometry & cloud registration
-│       ├── fuel/                  # Fast UAV Exploration (FUEL) hierarchical planner & FIESTA mapping
-│       ├── livox_ros_driver/      # Livox ROS driver for 3D LiDAR sensors
-│       └── velodyne_simulator/    # Velodyne VLP-16 gazebo plugins and descriptive meshes
-├── config/                        # Extrinsic calibrations and RViz visualization profiles
-│   ├── fast_lio/nidar_sim.yaml
-│   └── nidar_lidar.rviz
-├── scripts/                       # Autonomous mission managers and utility scripts
-│   ├── docker_dev_start.sh        # Team onboarding container launcher
-│   ├── flight_envelope_guard.py   # Trajectory-to-MAVROS offboard command bridge & safety envelope (v_max = 0.6 m/s)
-│   ├── relay_odometry.py          # Relays SLAM estimates to PX4 vision pose fusion
-│   └── test_takeoff.sh            # End-to-end automated mission execution script
-└── simulation/                    # Simulation models & PX4 Autopilot environment
-    ├── custom_models/iris_vlp16/  # Custom quadcopter integrated with VLP-16 LiDAR & IMU
-    └── PX4-Autopilot-v1.14.3/     # PX4 firmware pre-configured for GPS-denied EKF external vision
+├── docker/Dockerfile              # Ubuntu 20.04 + ROS Noetic + MAVROS + Livox-SDK + FUEL toolchain
+├── nidar_competition.world        # Gazebo world loaded by test_takeoff.sh (-> model://nidar_arena)
+├── catkin_ws/src/
+│   ├── FAST_LIO/                  # LiDAR-inertial SLAM; publishes /Fast_LIO/odometry (Z pinned to TFmini)
+│   ├── fuel/                      # FUEL exploration planner (exploration_manager, plan_manage,
+│   │                              #   bspline_opt, plan_env, path_searching, active_perception, ...)
+│   ├── ikd-Tree/                  # Incremental k-d tree used by FAST-LIO
+│   ├── livox_ros_driver/          # Livox LiDAR ROS driver
+│   ├── velodyne_simulator/        # Gazebo VLP-16 plugin + meshes
+│   └── PX4-Autopilot/             # NOT firmware: 12-file shim carrying velodyne_vlp16 meshes for rospack
+├── config/
+│   ├── fast_lio/nidar_sim.yaml    # FAST-LIO tuning
+│   ├── iris_vlp16.urdf            # robot_description for TF
+│   ├── nidar_lidar.rviz           # RViz profile (only loaded when RVIZ=1)
+│   └── flight_envelope_guard.yaml # Safety envelope: XY bounds, Z band, range/vision watchdogs
+├── launch/
+│   ├── fast_lio/nidar_mapping.launch
+│   └── nidar_fuel_upstream.launch # FUEL stack + traj_server + waypoint_generator
+├── scripts/                       # 8 live scripts, all reachable from test_takeoff.sh
+│   ├── test_takeoff.sh            # End-to-end mission entry point (GUI arg; RVIZ=1 for RViz)
+│   ├── setup_env.sh               # ROS/Gazebo/PX4 env + model & plugin paths
+│   ├── relay_odometry.py          # /Fast_LIO/odometry -> /mavros/vision_pose/pose
+│   ├── flight_envelope_guard.py   # /planning/pos_cmd -> MAVROS setpoints + safety envelope
+│   ├── cpu_repin_loop.sh          # Re-pins worker threads spawned after initial affinity set
+│   ├── mission_telemetry_logger.py
+│   ├── docker_dev_start.sh
+│   └── build_px4.sh
+├── simulation/
+│   ├── custom_models/
+│   │   ├── iris_vlp16/            # NOTE: not the spawned model -- see the header in that file
+│   │   ├── tfmini_lidar/          # Downward TFmini rangefinder (fixed-altitude 2D flight)
+│   │   ├── velodyne_vlp16/
+│   │   └── nidar_arena/           # Arena mesh loaded by nidar_competition.world
+│   └── PX4-Autopilot-v1.14.3/     # Vendored PX4 firmware (96% of tracked files; see cleanup plan Sec 4.4)
+│       └── .../models/iris_vlp16/iris_vlp16.sdf   # <- the model Gazebo ACTUALLY spawns
+└── PLANNING_DOCS/                 # Active engineering plans; archive/ holds resolved ones
 ```
-
----
 
 ## Key Technical Profiles
 * **EKF External Vision Fusion:** PX4 ROMFS defaults are hard-coded (`EKF2_EV_CTRL = 11`) to enable robust GPS-denied state estimation driven by `/Fast_LIO/odometry`, with `EKF2_BARO_CTRL = 1` fusing barometric height as a cross-check.

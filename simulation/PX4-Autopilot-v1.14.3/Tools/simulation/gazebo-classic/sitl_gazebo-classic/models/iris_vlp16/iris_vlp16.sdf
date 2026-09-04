@@ -82,5 +82,35 @@
       <parent>iris::base_link</parent>
       <child>velodyne_link</child>
     </joint>
+    <!-- TFmini Plus downward rangefinder, for fixed-altitude 2D flight.
+
+         Included as a nested model with a matching joint, exactly mirroring the stock
+         iris_opt_flow.sdf lidar mounting. BOTH names are load-bearing, and it is the JOINT name
+         that actually drives PX4 discovery:
+
+           * gazebo_lidar_plugin.cpp:108-124 builds the Gazebo transport topic from the sensor's
+             scoped link name "iris_vlp16::tfmini_lidar::link", taking the second-to-last element,
+             so it publishes on  ~/iris_vlp16/link/tfmini_lidar.
+           * gazebo_mavlink_interface.cpp:126-176 scans model_->GetJoints() for a joint name
+             matching .*(lidar|sf10a)(.*), strips the trailing "_joint", and subscribes to
+             ~/<model>/link/<that name>.
+
+         "tfmini_lidar_joint" -> "tfmini_lidar" makes the two sides meet. Renaming either the model
+         or the joint, or dropping the "_joint" suffix, silently breaks MAVLink DISTANCE_SENSOR
+         while the ROS /tfmini/range topic keeps working, which would leave EKF2_HGT_REF=2 with
+         no height source at all. Note the nested-model branch of that same function cannot help
+         here: it only ever inspects NestedModels()[0], which for this vehicle is "iris".
+
+         See PLANNING_DOCS/fixed_altitude_2d_flight_architecture_2026-09-03.md Sec 15. -->
+    <include>
+      <uri>model://tfmini_lidar</uri>
+      <pose>0 0 -0.05 0 0 0</pose>
+    </include>
+
+    <joint name="tfmini_lidar_joint" type="fixed">
+      <parent>iris::base_link</parent>
+      <child>tfmini_lidar::link</child>
+    </joint>
+
   </model>
 </sdf>

@@ -1,5 +1,13 @@
 # Walkthrough — NIDAR AirMouse Implementation & Verification
 
+> **STATUS NOTE (2026-09-04):** An external audit
+> (`PLANNING_DOCS/nidar_phase_plan_to_mission_complete.md`) found this document certifies work that
+> does not exist in the tree: `scripts/mission_manager.py`, `scripts/fuel_to_mavros_bridge.py`,
+> `config/fuel/exploration_planner.yaml`, `launch/nidar_fuel.launch`, and `ARENA/tomar.dae` are all
+> referenced below as complete/in-place and none of the five exist. There is no A*/RTH state machine
+> anywhere in the current tree. Treat this file as **historical record of what was attempted**, not
+> as a status report of what is currently built. Archived here for that reason.
+
 This document summarizes the technical updates, fixes, and runtime verification results executed according to the approved implementation plan.
 
 ---

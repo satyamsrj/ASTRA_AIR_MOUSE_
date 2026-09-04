@@ -1,0 +1,2 @@
+# Ignore external dependencies to save graphify tokens and processing time
+simulation/PX4-Autopilot-v1.14.3/

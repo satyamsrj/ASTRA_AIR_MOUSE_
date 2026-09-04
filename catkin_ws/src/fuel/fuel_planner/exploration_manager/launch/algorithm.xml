@@ -107,7 +107,14 @@
     <param name="frontier/min_candidate_clearance" value="0.10" type="double"/>
     <param name="frontier/candidate_dphi" value="$(eval 10 * 3.1415926 / 180.0)" type="double"/>
     <param name="frontier/candidate_rnum" value="5" type="int"/>
-    <param name="frontier/candidate_rmin" value="0.4" type="double"/>
+    <!-- rmin was 0.4. Viewpoints are clamped to z in [1.35,1.45] (below) while frontier cells span
+         the map box z in [1.2,1.6], so a cell sits up to 0.25m above/below the viewpoint. A real
+         VLP-16 only returns beams within +/-15deg of horizontal, so seeing a 0.25m offset needs a
+         horizontal standoff of 0.25/tan(15deg) = 0.93m. Every sample radius below that is
+         physically blind to the top and bottom of the slab no matter what the FOV model claims.
+         rmin=1.0 keeps all six sampled radii {1.0,1.32,1.64,1.96,2.28,2.6} outside the blind cone.
+         See PLANNING_DOCS/fuel_repeat_scan_root_cause_2026-09-04.md Sec 2. -->
+    <param name="frontier/candidate_rmin" value="1.0" type="double"/>
     <param name="frontier/candidate_rmax" value="2.6" type="double"/>
     <!-- Viewpoint candidates otherwise inherit their frontier cluster's own mean Z exactly, which
          drags cruise altitude up/down to match wherever a frontier happens to be, producing
@@ -116,18 +123,38 @@
          3D but doesn't chase every frontier's exact height. -->
     <!-- max kept at 1.6 (world ~1.7m), leaving 0.1m of margin below the guard's 1.8m effective
          ceiling so trajectory overshoot around the clamped viewpoint doesn't trigger rejects. -->
-    <param name="frontier/min_candidate_z" value="1.2" type="double"/>
-    <param name="frontier/max_candidate_z" value="1.6" type="double"/>
+    <param name="frontier/min_candidate_z" value="1.35" type="double"/>
+    <param name="frontier/max_candidate_z" value="1.45" type="double"/>
     <param name="frontier/down_sample" value="3" type="int"/>;
-    <param name="frontier/min_visib_num" value="10" type="int"/>;
+    <!-- was 10. min_visib_num is compared against countVisibleCells(), which iterates
+         frontier.filtered_cells_ - the cluster AFTER voxel-grid downsampling at
+         resolution*down_sample = 0.1*3 = 0.3m (frontier_finder.cpp downsample()). A minimum-size
+         cluster (cluster_min=30 raw 0.1m cells) inside the 0.4m-tall map slab collapses to roughly
+         5 filtered cells, and a typical wall-following cluster to ~10-20. Requiring visib_num > 10
+         was therefore unsatisfiable for small and mid clusters no matter where the viewpoint
+         stood, which is a large part of why ~60% of frontiers ended up dormant (measured: dormant
+         mean 16.25 vs visitable 10.7). 3 means "see at least 4 of the downsampled cells". -->
+    <param name="frontier/min_visib_num" value="3" type="int"/>;
     <param name="frontier/min_view_finish_fraction" value="0.6" type="double"/>;
 
     <!-- Perception utils (360-degree VLP-16 LiDAR Configuration) -->
     <param name="perception_utils/is_lidar" value="true" type="bool"/>;
-    <param name="perception_utils/top_angle" value="0.56125" type="double"/>;
+    <!-- top_angle was 0.56125 rad (32.2deg), but the VLP-16 actually spawned in Gazebo scans
+         vertical min_angle/max_angle = -0.261799..0.261799 rad, i.e. +/-15deg
+         (iris_vlp16.sdf, sensor "velodyne-VLP16"). insideFOV() accepted any cell with elevation
+         <= top_angle_, so the planner credited viewpoints with seeing cells between 15 and 32deg
+         elevation that the sensor can never return. Those cells stayed unknown after the visit,
+         the frontier failed min_view_finish_fraction, and FUEL re-targeted the same place - the
+         repeated corridor re-scans (measured mean 2.24 visits/cell, worst cell 10). Set to the
+         sensor's real half-FOV. -->
+    <param name="perception_utils/top_angle" value="0.261799" type="double"/>;
     <param name="perception_utils/left_angle" value="3.14159" type="double"/>;
     <param name="perception_utils/right_angle" value="3.14159" type="double"/>;
-    <param name="perception_utils/max_dist" value="4.5" type="double"/>;
+    <!-- was 4.5 while sdf_map/max_ray_length integrates to 6.5, so the planner under-credited
+         standoff viewpoints and preferred close ones, which are exactly the ones inside the
+         vertical blind cone. Raised to 6.0, still under the 6.5m raycast limit so the visibility
+         model never claims range the map does not actually integrate. -->
+    <param name="perception_utils/max_dist" value="6.0" type="double"/>;
     <param name="perception_utils/vis_dist" value="1.0" type="double"/>;
 
 
@@ -186,6 +213,13 @@
     <param name="optimization/ld_waypt" value="0.3" type="double"/>
     <param name="optimization/ld_view" value="0.0" type="double"/>
     <param name="optimization/ld_time" value="1.0" type="double"/>
+    <!-- Fixed-altitude 2D flight: pulls every B-spline control point toward z_cruise, not just
+         frontier endpoints. See
+         PLANNING_DOCS/fixed_altitude_2d_flight_architecture_2026-09-03.md Sec 5.
+         Starting weight, not yet empirically tuned; set to 0.0 to disable without
+         reverting the rest of the plan if it destabilizes the optimizer. -->
+    <param name="optimization/ld_alt" value="5.0" type="double"/>
+    <param name="optimization/z_cruise" value="1.4" type="double"/>
     <param name="optimization/dist0" value="0.7" type="double"/>
     <param name="optimization/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="optimization/max_acc" value="$(arg max_acc)" type="double"/>

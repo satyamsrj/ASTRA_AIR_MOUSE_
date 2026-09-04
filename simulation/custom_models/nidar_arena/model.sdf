@@ -12,10 +12,20 @@
           </mesh>
         </geometry>
         <surface>
+          <!-- mu/mu2 were 100/50, roughly two orders of magnitude above any real material
+               (typical concrete-on-rubber is ~0.6-1.0; ODE/SDF's own unset default is 1.0, which
+               is what the vehicle's own collision surfaces use). At that friction, any contact
+               between the vehicle's collision box and a wall resists tangential sliding almost
+               completely instead of letting the vehicle deflect and continue past: motor thrust
+               fights the contact instead of the vehicle sliding along the wall, which reads as the
+               drone getting physically stuck to the wall on contact. Set to ODE's own default
+               (1.0) rather than removing the override, so the value stays visible and intentional
+               rather than reverting to "whatever the engine happens to default to". See
+               PLANNING_DOCS/guard_state_validation_and_wall_stuck_fix_2026-09-04.md Sec 4. -->
           <friction>
             <ode>
-              <mu>100</mu>
-              <mu2>50</mu2>
+              <mu>1.0</mu>
+              <mu2>1.0</mu2>
             </ode>
           </friction>
         </surface>

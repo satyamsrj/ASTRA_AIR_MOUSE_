@@ -4,11 +4,17 @@ SPAWN_X=${2:-0.0}
 SPAWN_Y=${3:--6.5}
 SPAWN_Z=${4:-0.1}
 SPAWN_YAW=${5:-1.5708}
+# RViz is controlled separately from the Gazebo GUI and defaults to OFF, because it is by far the
+# most expensive optional process in this stack: measured at ~290% CPU, i.e. roughly 3 of this
+# machine's 12 hardware threads, purely for visualisation. Leaving it off gives FAST-LIO and
+# gzserver that headroom back. Set RVIZ=1 to bring the window back:
+#     RVIZ=1 ./scripts/test_takeoff.sh true 0.0 -6.5 0.1 1.5708
+RVIZ_ARG=${RVIZ:-0}
+if [ "$RVIZ_ARG" = "1" ] || [ "$RVIZ_ARG" = "true" ]; then RVIZ_ARG=true; else RVIZ_ARG=false; fi
 echo "Starting clean FUEL exploration test (GUI=${GUI_ARG}) at position (X=${SPAWN_X}, Y=${SPAWN_Y}, Z=${SPAWN_Z}, Yaw=${SPAWN_YAW})..."
 
 # Ensure clean slate
 killall -9 rosmaster rosout roslaunch gzserver gzclient px4 mavros_node rostopic px4-simulator_mavlink 2>/dev/null || true
-pkill -f minimal_fuel_adapter.py 2>/dev/null || true
 pkill -f flight_envelope_guard.py 2>/dev/null || true
 pkill -f relay_odometry.py 2>/dev/null || true
 pkill -f exploration_node 2>/dev/null || true
@@ -17,6 +23,23 @@ pkill -f waypoint_generator 2>/dev/null || true
 pkill -f fast_lio 2>/dev/null || true
 pkill -f FAST_LIO 2>/dev/null || true
 pkill -f cpu_repin_loop.sh 2>/dev/null || true
+# rviz and the telemetry logger were missing from this list, and both outlive a killed run:
+# rviz is started by nidar_mapping.launch (rviz:=$GUI_ARG) and is not one of the `killall` names
+# above, while mission_telemetry_logger.py runs in the foreground of the previous invocation.
+# A surviving rviz idles at ~290% CPU and a surviving FAST-LIO publishes a SECOND, conflicting
+# solution onto /Fast_LIO/odometry, which makes the next run's odometry jump between two
+# estimates and look like a SLAM divergence. Observed on 2026-09-04: a re-run inherited 3 gzserver
+# / 3 px4 / 2 fastlio_mapping processes and diverged to (-26, 56) within 30 s of takeoff.
+pkill -f rviz 2>/dev/null || true
+pkill -f mission_telemetry_logger.py 2>/dev/null || true
+# robot_state_publisher / static_transform_publisher are started by nidar_mapping.launch and are
+# not among the `killall` names either, so they accumulate across runs -- five of them were found
+# alive with no simulation running.
+pkill -f robot_state_publisher 2>/dev/null || true
+pkill -f static_transform_publisher 2>/dev/null || true
+# Give the SIGKILLs time to land before spawning replacements -- `killall` returns immediately and
+# gzserver in particular (a /bin/sh wrapper plus a forked child) can outlive the call by a second.
+sleep 3
 rm -rf /home/developer/.ros/dataman /home/developer/.ros/eeprom /home/developer/.ros/parameters.bson /home/developer/.ros/parameters_backup.bson
 
 sim_sleep() {
@@ -79,8 +102,8 @@ pin_process "gzserver" "2,3"
 pin_process "bin/px4" "4,5"
 pin_process "mavros_node" "6,7"
 
-echo "Launching FAST-LIO2 Mapping & RViz..."
-roslaunch /home/developer/NIDAR/launch/fast_lio/nidar_mapping.launch rviz:=$GUI_ARG > /tmp/fast_lio.log 2>&1 &
+echo "Launching FAST-LIO2 Mapping (RViz=${RVIZ_ARG}; set RVIZ=1 to show it)..."
+roslaunch /home/developer/NIDAR/launch/fast_lio/nidar_mapping.launch rviz:=$RVIZ_ARG > /tmp/fast_lio.log 2>&1 &
 sim_sleep 2
 pin_process "fastlio_mapping" "0,1"
 

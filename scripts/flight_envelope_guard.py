@@ -36,6 +36,7 @@ from quadrotor_msgs.msg import PositionCommand
 from mavros_msgs.msg import PositionTarget, State
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import Range
 from std_msgs.msg import String
 
 
@@ -100,6 +101,13 @@ class FlightEnvelopeGuard:
         self.vision_timeout = rospy.get_param(param_ns + 'vision_timeout', 1.0)
         self.last_vision_time = rospy.Time(0)
 
+        # Range (TFmini) staleness watchdog -- same idiom as vision_timeout above, required now
+        # that TFmini is PX4's sole height reference (EKF2_HGT_REF=2): a stale/bad range reading
+        # is exactly as serious a failure mode as a vision stall, since nothing inside PX4
+        # automatically falls back to another height source.
+        self.range_timeout = rospy.get_param(param_ns + 'range_timeout', 1.0)
+        self.last_range_time = rospy.Time(0)
+
         # Effective World Boundaries incorporating safety margin
         self.eff_xw_min = self.world_x_min + self.boundary_margin
         self.eff_xw_max = self.world_x_max - self.boundary_margin
@@ -154,6 +162,7 @@ class FlightEnvelopeGuard:
         self.sub_state = rospy.Subscriber('/mavros/state', State, self.state_cb, queue_size=1)
         self.sub_pose = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.pose_cb, queue_size=1)
         self.sub_vision = rospy.Subscriber('/Fast_LIO/odometry', Odometry, self.vision_cb, queue_size=1)
+        self.sub_range = rospy.Subscriber('/tfmini/range', Range, self.range_cb, queue_size=1)
         self.sub_fuel = rospy.Subscriber('/planning/pos_cmd', PositionCommand, self.fuel_cb, queue_size=10)
 
         # ROS Publishers
@@ -213,6 +222,9 @@ class FlightEnvelopeGuard:
     def vision_cb(self, msg):
         self.last_vision_time = rospy.Time.now()
 
+    def range_cb(self, msg):
+        self.last_range_time = rospy.Time.now()
+
     def validate_command(self, cmd):
         """
         Validate position command in Authoritative Gazebo World Frame.
@@ -233,34 +245,73 @@ class FlightEnvelopeGuard:
         if yw > self.eff_yw_max:
             return False, "OUT_OF_BOUNDS_Y_MAX", f"World Y above max (North Wall: yw={yw:.2f}m > {self.eff_yw_max:.2f}m)", (xw, yw, zw)
 
-        # 3. World Frame Z boundary check
+        # 3. World Frame Z boundary check -- clamped and forwarded, not hard-rejected. X/Y are
+        # already confirmed valid above, so the command is otherwise usable; rejecting it outright
+        # would freeze last_valid_command at a stale pre-approach position while the vehicle's
+        # real (undamped) momentum carries it past that point -- the discontinuity documented in
+        # PLANNING_DOCS/fixed_altitude_2d_flight_architecture_2026-09-03.md Sec 1 failure #4 and
+        # fixed in Sec 6.3. Traj_server hard-pins Z to a constant now, so this should rarely fire
+        # in practice -- it exists as a backstop for whatever bypasses that pin (e.g. the
+        # fallback-hold path below, or a future code path that doesn't go through traj_server).
         if zw < self.eff_zw_min:
-            return False, "OUT_OF_BOUNDS_Z_MIN", f"World Z below min (zw={zw:.2f}m < {self.eff_zw_min:.2f}m)", (xw, yw, zw)
+            return True, "CLAMPED_Z_MIN", f"World Z below min, clamped (zw={zw:.2f}m < {self.eff_zw_min:.2f}m)", (xw, yw, self.eff_zw_min)
         if zw > self.eff_zw_max:
-            return False, "OUT_OF_BOUNDS_Z_MAX", f"World Z above max (zw={zw:.2f}m > {self.eff_zw_max:.2f}m)", (xw, yw, zw)
+            return True, "CLAMPED_Z_MAX", f"World Z above max, clamped (zw={zw:.2f}m > {self.eff_zw_max:.2f}m)", (xw, yw, self.eff_zw_max)
 
-        # 4. Vehicle current pose warning (if pose available)
-        if self.current_pose is not None:
-            # Convert MAVROS local_position/pose (ENU: x=East, y=North) to camera_init frame (xc=North, yc=West)
-            c_xc = self.current_pose.pose.position.y
-            c_yc = -self.current_pose.pose.position.x
-            c_zc = self.current_pose.pose.position.z
-            c_xw, c_yw, c_zw = self.camera_to_world(c_xc, c_yc, c_zc)
+        # 4. Vehicle current pose (actual STATE, not just the command) must also be inside the
+        # envelope. This used to warn and fall through to ACCEPT regardless -- meaning a vehicle
+        # that had already drifted outside the safe volume (from momentum, wind, or a prior bad
+        # command) was never actually stopped: the log said "guiding to safe interior setpoint"
+        # but nothing downstream did any guiding. Reject here instead, so fuel_cb's existing
+        # REJECT path takes over and timer_cb's fallback-hold (now frame-correct, see
+        # _current_pose_world below) drives the vehicle back rather than just logging that it should.
+        # X/Y only, deliberately -- NOT Z. Verified live 2026-09-04: gating this on Z as well
+        # produced 33 faults in one flight, 100% false positives (X/Y was inside the envelope
+        # every single time). eff_zw_min/max is only a 4cm band (1.48-1.52) and normal EKF2
+        # height noise (measured sd ~0.02-0.03m) crosses it on ordinary hover jitter -- that's
+        # not the same failure mode as spatial excursion into a wall. Z already has independent
+        # protection commands never bypass: traj_server hard-pins commanded Z to a constant, and
+        # the CLAMPED_Z_MIN/MAX check above (item 3) backstops the command path. Faulting STATE on
+        # routine Z noise would make the guard cry wolf continuously and mask real X/Y faults in
+        # the noise.
+        pose_w = self._current_pose_world()
+        if pose_w is not None:
+            c_xw, c_yw, c_zw = pose_w
             if c_xw < self.eff_xw_min or c_xw > self.eff_xw_max or \
-               c_yw < self.eff_yw_min or c_yw > self.eff_yw_max or \
-               c_zw < self.eff_zw_min or c_zw > self.eff_zw_max:
-                rospy.logwarn_throttle(2.0, f"[FlightEnvelopeGuard] Vehicle current pose near/outside margin: world=({c_xw:.2f},{c_yw:.2f},{c_zw:.2f}) | guiding to safe interior setpoint")
+               c_yw < self.eff_yw_min or c_yw > self.eff_yw_max:
+                return False, "FAULT_STATE_OUT_OF_ENVELOPE", \
+                    f"Vehicle actual XY outside envelope: world=({c_xw:.2f},{c_yw:.2f},{c_zw:.2f})", \
+                    (xw, yw, zw)
 
         return True, "ACCEPT", "Safe setpoint inside arena envelope", (xw, yw, zw)
 
     def _current_pose_world(self):
-        """Actual vehicle pose in world frame, for diagnostic correlation. None if no pose yet."""
+        """Actual vehicle pose in world frame. None if no pose yet.
+
+        /mavros/local_position/pose is NOT rotated relative to camera_init in this stack: it is
+        PX4's fused EKF2 estimate, and EKF2's position source is /mavros/vision_pose/pose, which
+        relay_odometry.py populates from FAST-LIO's camera_init pose UNMODIFIED
+        (`pose_msg.pose = msg.pose.pose` in relay_odometry.py -- no rotation applied there either).
+        So MAVROS local_position ends up expressed in the same frame as camera_init already, and
+        needs to go straight into camera_to_world(), exactly like /planning/pos_cmd does above.
+        Confirmed empirically 2026-09-04: /Fast_LIO/odometry and /mavros/local_position/pose read
+        near-identical (x,y) at the same instant (e.g. (13.37,-0.58) vs (13.38,-0.62)), and logged
+        FASTLIO/EKF divergence stayed under 0.1 m for an entire flight -- both would be impossible
+        if a 90-degree rotation existed between them and were being ignored.
+        A prior version of this function (and its two duplicate inline copies in validate_command's
+        old block 4 and timer_cb's fallback-hold) pre-rotated this pose as if it were standard ENU
+        before calling camera_to_world, rotating it TWICE. That made the fallback-hold path -- the
+        one that actually commands the vehicle when a command is rejected -- compute a hold point
+        up to arena-diagonal distance away from where the vehicle actually was, instead of holding
+        station. Every command rejected near a wall (the common case, since that is where frontiers
+        cluster against the boundary) triggered one of these large erroneous jumps, which is what
+        looked like the vehicle getting stuck/thrown at the walls.
+        """
         if self.current_pose is None:
             return None
-        pose_xc = self.current_pose.pose.position.y
-        pose_yc = -self.current_pose.pose.position.x
-        pose_zc = self.current_pose.pose.position.z
-        return self.camera_to_world(pose_xc, pose_yc, pose_zc)
+        return self.camera_to_world(self.current_pose.pose.position.x,
+                                     self.current_pose.pose.position.y,
+                                     self.current_pose.pose.position.z)
 
     def fuel_cb(self, msg):
         xc, yc, zc = msg.position.x, msg.position.y, msg.position.z
@@ -280,6 +331,27 @@ class FlightEnvelopeGuard:
             self.pub_status.publish(f"REJECT: code=VISION_STALE | age={vision_age:.2f}s")
             self.diag_writer.writerow([
                 rospy.Time.now().to_sec(), 'REJECT', 'VISION_STALE',
+                xc, yc, zc, msg.velocity.x, msg.velocity.y, msg.velocity.z,
+                '', '', '',
+                '', '', '', '', '', '',
+                pose_w[0] if pose_w else '', pose_w[1] if pose_w else '', pose_w[2] if pose_w else '',
+            ])
+            self.diag_file.flush()
+            return
+
+        range_age = (rospy.Time.now() - self.last_range_time).to_sec()
+        if self.last_range_time.to_sec() == 0.0 or range_age > self.range_timeout:
+            # TFmini is PX4's sole height reference (EKF2_HGT_REF=2) -- if it stops updating,
+            # PX4's own height estimate has nothing backing it up. Same fallback as VISION_STALE.
+            self.rejected_count += 1
+            rospy.logwarn_throttle(
+                1.0,
+                f"[FlightEnvelopeGuard] REJECT [RANGE_STALE]: /tfmini/range age={range_age:.2f}s "
+                f"> {self.range_timeout:.2f}s | holding last safe position"
+            )
+            self.pub_status.publish(f"REJECT: code=RANGE_STALE | age={range_age:.2f}s")
+            self.diag_writer.writerow([
+                rospy.Time.now().to_sec(), 'REJECT', 'RANGE_STALE',
                 xc, yc, zc, msg.velocity.x, msg.velocity.y, msg.velocity.z,
                 '', '', '',
                 '', '', '', '', '', '',
@@ -418,12 +490,10 @@ class FlightEnvelopeGuard:
                 PositionTarget.IGNORE_AFZ |
                 PositionTarget.IGNORE_YAW_RATE
             )
-            if self.current_pose is not None:
-                # Convert MAVROS local_position/pose (ENU: x=East, y=North) to camera_init frame (xc=North, yc=West)
-                pose_xc = self.current_pose.pose.position.y
-                pose_yc = -self.current_pose.pose.position.x
-                pose_zc = self.current_pose.pose.position.z
-                pose_xw, pose_yw, pose_zw = self.camera_to_world(pose_xc, pose_yc, pose_zc)
+            pose_w = self._current_pose_world()
+            if pose_w is not None:
+                # camera_init already -- see _current_pose_world()'s docstring.
+                pose_xw, pose_yw, pose_zw = pose_w
                 xw_c = min(max(pose_xw, self.eff_xw_min), self.eff_xw_max)
                 yw_c = min(max(pose_yw, self.eff_yw_min), self.eff_yw_max)
                 target_zw = max(pose_zw, self.default_altitude)

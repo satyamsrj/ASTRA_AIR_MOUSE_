@@ -1,0 +1,129 @@
+<?xml version="1.0" ?>
+<!--
+  Benewake TFmini Plus downward-facing rangefinder (simulated).
+
+  Two plugins deliberately share one ray sensor:
+    1. libgazebo_lidar_plugin.so  -> PX4 SITL, as MAVLink DISTANCE_SENSOR over the lockstep link
+                                     (gazebo_mavlink_interface.cpp::LidarCallback), which PX4's
+                                     SimulatorMavlink.cpp turns into the uORB distance_sensor topic
+                                     EKF2 fuses. This is the path EKF2_HGT_REF=2 depends on.
+    2. libgazebo_ros_range.so     -> ROS, as sensor_msgs/Range on /tfmini/range, consumed by
+                                     FAST-LIO's publish_odometry() Z-pin and by
+                                     flight_envelope_guard.py's range-staleness watchdog.
+
+  NAMING IS LOAD-BEARING, on both sides, and they must agree:
+
+    * This model's name sets the Gazebo transport topic. gazebo_lidar_plugin.cpp:108-124 takes the
+      sensor's scoped link name ("iris_vlp16::tfmini_lidar::link") and uses the second-to-last
+      element, publishing on ~/iris_vlp16/link/tfmini_lidar.
+    * The MOUNTING JOINT's name sets what PX4 listens for. gazebo_mavlink_interface.cpp:126-176
+      scans model_->GetJoints() for a name matching `.*(lidar|sf10a)(.*)`
+      (gazebo_mavlink_interface.h:78), strips the trailing "_joint", and subscribes to
+      ~/<model>/link/<that name>. So the joint must be named "tfmini_lidar_joint".
+
+  The nested-model branch of that same function does NOT apply here: it only ever examines
+  NestedModels()[0], which for iris_vlp16 is the base "iris" include. The joint path is the one
+  that carries this sensor. Rename either side, or drop the "_joint" suffix, and PX4 silently
+  receives no DISTANCE_SENSOR at all while ROS /tfmini/range keeps working normally, leaving
+  EKF2_HGT_REF=2 with no height source.
+
+  See PLANNING_DOCS/fixed_altitude_2d_flight_architecture_2026-09-03.md Sec 15.
+-->
+<sdf version="1.5">
+  <model name="tfmini_lidar">
+    <link name="link">
+      <pose>0 0 0 0 0 0</pose>
+
+      <inertial>
+        <pose>0 0 0 0 0 0</pose>
+        <!-- ~5g, a real TFmini Plus's rough weight. Explicit on purpose: a link with no
+             <inertial> commonly defaults to 1kg, which on a ~1.5kg iris airframe would be a
+             silent ~65% mass increase and would visibly degrade flight dynamics. -->
+        <mass>0.005</mass>
+        <inertia>
+          <ixx>1.0e-7</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.0e-7</iyy>
+          <iyz>0</iyz>
+          <izz>1.0e-7</izz>
+        </inertia>
+      </inertial>
+
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>model://tfmini_lidar/meshes/tfmini.stl</uri>
+            <!-- The CAD file is authored in millimetres (measured bounding box 25 x 21 x 35 raw
+                 units). Without this scale it would spawn as a 25-metre block. -->
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Black</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+
+      <!-- Simple primitive rather than the CAD mesh: detailed concave collision meshes are
+           expensive and prone to spawn-time interpenetration instability. Sized from the same
+           measured bounding box, mm -> m. -->
+      <collision name="collision">
+        <geometry>
+          <box>
+            <size>0.025 0.021 0.035</size>
+          </box>
+        </geometry>
+      </collision>
+
+      <sensor name="tfmini_lidar" type="ray">
+        <!-- Pitch +90 deg so the beam points straight down, matching the stock lidar/sf10a
+             models' convention. -->
+        <pose>0 0 0 0 1.57079633 0</pose>
+        <always_on>1</always_on>
+        <update_rate>20</update_rate>
+        <visualize>false</visualize>
+        <ray>
+          <scan>
+            <horizontal>
+              <samples>1</samples>
+              <resolution>1</resolution>
+              <min_angle>-0</min_angle>
+              <max_angle>0</max_angle>
+            </horizontal>
+          </scan>
+          <range>
+            <min>0.06</min> <!-- do not change: use min_distance (below) for realistic behavior -->
+            <max>35</max>   <!-- do not change: use max_distance (below) for realistic behavior -->
+            <resolution>0.01</resolution>
+          </range>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.01</stddev>
+          </noise>
+        </ray>
+
+        <plugin name="LaserPlugin" filename="libgazebo_lidar_plugin.so">
+          <robotNamespace></robotNamespace>
+          <min_distance>0.1</min_distance>
+          <max_distance>12.0</max_distance>
+        </plugin>
+
+        <plugin name="tfmini_ros_range" filename="libgazebo_ros_range.so">
+          <robotNamespace></robotNamespace>
+          <topicName>/tfmini/range</topicName>
+          <frameName>tfmini_link</frameName>
+          <fov>0.05</fov>
+          <radiation>infrared</radiation>
+          <minRange>0.1</minRange>
+          <maxRange>12.0</maxRange>
+          <gaussianNoise>0.01</gaussianNoise>
+          <updateRate>20</updateRate>
+        </plugin>
+      </sensor>
+    </link>
+  </model>
+</sdf>

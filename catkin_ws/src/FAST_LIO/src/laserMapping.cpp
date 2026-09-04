@@ -53,6 +53,7 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/Range.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
 #include <geometry_msgs/Vector3.h>
@@ -136,6 +137,76 @@ nav_msgs::Path path;
 nav_msgs::Odometry odomAftMapped;
 geometry_msgs::Quaternion geoQuat;
 geometry_msgs::PoseStamped msg_body_pose;
+
+// Fixed-altitude 2D flight: published odometry Z is pinned to the TFmini-informed height instead
+// of FAST-LIO's raw LiDAR-SLAM Z estimate, so FUEL's own map-building/tracking-divergence checks
+// never see a drifting height. X/Y/yaw remain FAST-LIO's own untouched SLAM solve: only this one
+// field is overridden, at the publish boundary (publish_odometry(), below), not inside the IKFoM
+// filter. See PLANNING_DOCS/fixed_altitude_2d_flight_architecture_2026-09-03.md Sec 13.
+//
+// The pin is applied ONLY while a fresh, in-range TFmini sample backs it (g_range_valid plus the
+// g_range_timeout age check in publish_odometry). If the rangefinder has never been seen or has
+// gone stale, publish_odometry falls through to FAST-LIO's own Z rather than asserting a height.
+//
+// That fallback is not a nicety, it is the whole safety property. An earlier revision seeded this
+// variable with a plain 1.4 default and pinned unconditionally, so when the sensor was absent
+// entirely FAST-LIO reported a rock-steady 1.4 m while the vehicle sat on the ground. That value
+// reached EKF2 through relay_odometry -> /mavros/vision_pose/pose, so PX4 believed it was already
+// at its 1.5 m takeoff altitude, armed, logged "Takeoff detected" and never climbed. Degrading to
+// a noisier but real Z is always safer than publishing a confident fabricated one.
+double g_pinned_height_camera_init = 0.0;
+bool   g_range_valid = false;
+double g_last_range_time = 0.0;
+
+// Age beyond which a TFmini sample stops being trusted, seconds. Deliberately matches the
+// range_timeout default in config/flight_envelope_guard.yaml so both watchdogs trip together.
+double g_range_timeout = 1.0;
+
+// Usable measurement band of the rangefinder, metres. These are the TFmini Plus's own operating
+// limits and are deliberately NOT read from the incoming message's min_range/max_range fields.
+// libgazebo_ros_range.so populates those from the <ray><range> element (0.06 / 35 m), not from the
+// plugin's <minRange>/<maxRange>, and 35 m is exactly the value the ray sensor reports when the
+// beam hits NOTHING. A bounds test written against msg->max_range therefore compares 35.0 > 35.0,
+// accepts the no-return sentinel, and pins the published altitude to ~35 m. That is what happened
+// on 2026-09-04: after the vehicle touched down, FAST-LIO published z = 34.95 for the rest of the
+// run, relay_odometry clamped it to its 10 m ceiling, and PX4 sat on the ground convinced it was
+// 10 m up. Gate on the sensor's real band instead, so both the 35 m no-return and the 0 m
+// underflow are rejected outright.
+double g_range_min = 0.10;
+double g_range_max = 12.0;
+
+// Vertical offset from the vehicle reference point (iris::base_link) DOWN to the TFmini's beam
+// origin, in metres: the sensor sits this far below the point whose altitude the rest of the stack
+// talks about. Matches the <pose>0 0 -0.05</pose> the tfmini_lidar model is mounted at in
+// simulation/PX4-Autopilot-v1.14.3/Tools/simulation/gazebo-classic/sitl_gazebo-classic/models/
+// iris_vlp16/iris_vlp16.sdf. Overridable via the param below so it can be corrected without a
+// rebuild.
+// NEEDS EMPIRICAL CHECK ON FIRST TEST: compare /tfmini/range against
+// `rosservice call /gazebo/get_model_state "model_name: 'iris_vlp16'"` at a steady hover and
+// confirm the converted value below matches ground-truth Z. A systematic error here matters:
+// the guard's effective Z band is only ~4cm wide.
+double g_tfmini_mount_offset = 0.05;
+
+void rangeCb(const sensor_msgs::Range::ConstPtr& msg)
+{
+    // Drop NaN/inf and out-of-band readings rather than pinning to them. See g_range_min/max above
+    // for why this deliberately does not use msg->min_range / msg->max_range.
+    if (!std::isfinite(msg->range) || msg->range < g_range_min || msg->range > g_range_max)
+    {
+        ROS_WARN_THROTTLE(2.0,
+            "[FAST-LIO] ignoring out-of-band /tfmini/range %.2f m (valid %.2f-%.2f); "
+            "Z stays unpinned until a usable reading returns",
+            msg->range, g_range_min, g_range_max);
+        return;
+    }
+
+    // TFmini measures sensor-to-floor distance. Convert to base_link altitude by adding the mount
+    // offset, then to camera_init using the same rigid transform flight_envelope_guard.py uses
+    // (zw = zc + 0.1), inverted:  zc = zw - 0.1 = (range + mount_offset) - 0.1
+    g_pinned_height_camera_init = msg->range + g_tfmini_mount_offset - 0.1;
+    g_last_range_time = ros::Time::now().toSec();
+    g_range_valid = true;
+}
 
 shared_ptr<Preprocess> p_pre(new Preprocess());
 shared_ptr<ImuProcess> p_imu(new ImuProcess());
@@ -592,6 +663,21 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
     odomAftMapped.child_frame_id = "body";
     odomAftMapped.header.stamp = ros::Time().fromSec(lidar_end_time);// ros::Time().fromSec(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
+    // Fixed-altitude 2D flight: see g_pinned_height_camera_init's declaration above. Pin the
+    // published Z to the rangefinder only while a fresh sample backs it; otherwise leave
+    // FAST-LIO's own estimate in place so a silent sensor degrades to real (if noisier) data
+    // instead of a fabricated altitude.
+    if (g_range_valid && (ros::Time::now().toSec() - g_last_range_time) < g_range_timeout)
+    {
+        odomAftMapped.pose.pose.position.z = g_pinned_height_camera_init;
+    }
+    else
+    {
+        ROS_WARN_THROTTLE(2.0,
+            "[FAST-LIO] /tfmini/range %s -- publishing raw SLAM Z (%.2f) unpinned",
+            g_range_valid ? "stale" : "never received",
+            odomAftMapped.pose.pose.position.z);
+    }
     pubOdomAftMapped.publish(odomAftMapped);
     auto P = kf.get_P();
     for (int i = 0; i < 6; i ++)
@@ -791,6 +877,10 @@ int main(int argc, char** argv)
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
     nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
+    nh.param<double>("mapping/tfmini_mount_offset", g_tfmini_mount_offset, 0.05);
+    nh.param<double>("mapping/tfmini_range_timeout", g_range_timeout, 1.0);
+    nh.param<double>("mapping/tfmini_range_min", g_range_min, 0.10);
+    nh.param<double>("mapping/tfmini_range_max", g_range_max, 12.0);
 
     p_pre->lidar_type = lidar_type;
     cout<<"p_pre->lidar_type "<<p_pre->lidar_type<<endl;
@@ -846,6 +936,7 @@ int main(int argc, char** argv)
         nh.subscribe(lid_topic, 200000, livox_pcl_cbk) : \
         nh.subscribe(lid_topic, 200000, standard_pcl_cbk);
     ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
+    ros::Subscriber sub_range = nh.subscribe("/tfmini/range", 10, rangeCb);
     ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>
             ("/cloud_registered", 100000);
     ros::Publisher pubLaserCloudFull_body = nh.advertise<sensor_msgs::PointCloud2>

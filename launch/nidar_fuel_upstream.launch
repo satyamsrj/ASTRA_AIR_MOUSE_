@@ -6,7 +6,7 @@
 
   <arg name="init_x" value="0.0"/>
   <arg name="init_y" value="0.0"/>
-  <arg name="init_z" value="1.5"/>
+  <arg name="init_z" value="1.4"/>
 
   <!-- Topics from FAST-LIO2 and MAVROS -->
   <arg name="odom_topic" value="/Fast_LIO/odometry"/>
@@ -19,12 +19,31 @@
     <arg name="map_size_y_" value="$(arg map_size_y)"/>
     <arg name="map_size_z_" value="$(arg map_size_z)"/>
 
-    <arg name="box_min_x" value="-0.5"/>
-    <arg name="box_min_y" value="-7.0"/>
-    <arg name="box_min_z" value="0.2"/>
-    <arg name="box_max_x" value="13.5"/>
-    <arg name="box_max_y" value="7.0"/>
-    <arg name="box_max_z" value="1.9"/>
+    <!-- Tightened to sit exactly inside flight_envelope_guard.py's effective envelope (world
+         +/-6.8, i.e. arena +/-7.0 minus boundary_margin 0.2), not the raw arena size. The previous
+         -0.5/13.5/-7.0/7.0 box let FUEL plan frontiers into a 0.2m ring the guard always rejects,
+         so the vehicle repeatedly targeted, got refused, and (until the fallback-hold frame bug
+         above was fixed) jumped, reading as "stuck at the walls". See
+         PLANNING_DOCS/nidar_phase_plan_to_mission_complete.md and camera_to_world's inverse in
+         flight_envelope_guard.py for the world<->camera_init conversion this box is derived from. -->
+    <!-- Z was 1.0..1.9. The vehicle is pinned to z=1.4 and the VLP-16 only returns beams within
+         +/-15deg of horizontal, so a cell 0.5m above the vehicle (the old box ceiling) is only
+         observable from 0.5/tan(15deg) = 1.87m away horizontally - farther than most sampled
+         viewpoint radii. The top and bottom layers of a 0.9m box were therefore permanently
+         unobservable near the vehicle, so frontiers spanning the full box height could never
+         reach min_view_finish_fraction and never cleared: the frontier set froze at exactly
+         "15 detected | 10 visitable | 15 dormant | 243 viewpoints" for the last several minutes
+         of the 09_15_51 run while the vehicle kept flying.
+         0.4m box (+/-0.2 around cruise) needs only 0.25/tan(15deg) = 0.93m of standoff, which
+         candidate_rmin=1.0 guarantees. This is a 2D slab map, which is what the mission actually
+         needs; the arena walls are 2.44m tall so they are fully captured in the slab.
+         See PLANNING_DOCS/fuel_repeat_scan_root_cause_2026-09-04.md. -->
+    <arg name="box_min_x" value="-0.3"/>
+    <arg name="box_min_y" value="-6.8"/>
+    <arg name="box_min_z" value="1.2"/>
+    <arg name="box_max_x" value="13.3"/>
+    <arg name="box_max_y" value="6.8"/>
+    <arg name="box_max_z" value="1.6"/>
 
     <arg name="odometry_topic" value="$(arg odom_topic)"/>
     <arg name="sensor_pose_topic" value="$(arg sensor_pose_topic)"/>
@@ -58,6 +77,7 @@
     <param name="traj_server/init_x" value="$(arg init_x)" type="double"/>
     <param name="traj_server/init_y" value="$(arg init_y)" type="double"/>
     <param name="traj_server/init_z" value="$(arg init_z)" type="double"/>
+    <param name="traj_server/z_cruise" value="1.4" type="double"/>
   </node>
 
   <!-- Upstream Waypoint Generator -->

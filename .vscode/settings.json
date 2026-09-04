@@ -1,0 +1,61 @@
+{
+  // ---------------------------------------------------------------------------------------------
+  // Compute budget, not style.
+  //
+  // This workspace has 31,685 tracked files and ~6 GB on disk, of which 30,447 files (96%) are the
+  // vendored simulation/PX4-Autopilot-v1.14.3 tree. 19,252 of the 19,816 C/C++ files in the repo
+  // live there. VS Code indexes the WORKING DIRECTORY, not git, so .gitignore does not protect you
+  // from any of this: cpptools was measured at 211% CPU (~2 of this machine's 12 hardware threads)
+  // continuously re-parsing PX4 sources nobody edits, while the simulation was fighting for the
+  // same cores. That is a large part of the "high-end PC, still CPU-bound" problem.
+  //
+  // The vendored tree is still fully readable and searchable; it is only excluded from background
+  // IntelliSense parsing and filesystem watching. Delete this file to go back to indexing all of it.
+  // ---------------------------------------------------------------------------------------------
+
+  // Background C/C++ IntelliSense parsing: skip vendored + generated code.
+  "C_Cpp.files.exclude": {
+    "**/.git": true,
+    "simulation/PX4-Autopilot-v1.14.3/**": true,
+    "catkin_ws/build/**": true,
+    "catkin_ws/devel/**": true,
+    "FAST_LIO/**": true,
+    "graphify-out/**": true,
+    "logs/**": true
+  },
+  // Keep the parser lazy rather than eagerly walking the whole tree on startup.
+  "C_Cpp.intelliSenseEngineFallback": "enabled",
+  "C_Cpp.workspaceParsingPriority": "medium",
+
+  // File watchers are a separate, additive cost: one inotify watch per directory, plus a wake-up
+  // for every write. The PX4 build tree churns constantly during a build.
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "simulation/PX4-Autopilot-v1.14.3/build/**": true,
+    "simulation/PX4-Autopilot-v1.14.3/Tools/**": true,
+    "catkin_ws/build/**": true,
+    "catkin_ws/devel/**": true,
+    "catkin_ws/logs/**": true,
+    "FAST_LIO/**": true,
+    "graphify-out/**": true,
+    "graphify/**": true,
+    "logs/**": true,
+    "**/__pycache__/**": true
+  },
+
+  // Search: exclude build output and local caches, but deliberately NOT the PX4 source itself --
+  // reading PX4 internals is a routine part of debugging this stack, and search is on-demand and
+  // cheap, unlike background parsing.
+  "search.exclude": {
+    "simulation/PX4-Autopilot-v1.14.3/build/**": true,
+    "catkin_ws/build/**": true,
+    "catkin_ws/devel/**": true,
+    "catkin_ws/logs/**": true,
+    "FAST_LIO/**": true,
+    "graphify-out/**": true,
+    "logs/**": true,
+    "**/__pycache__/**": true
+  },
+  "search.followSymlinks": false
+}

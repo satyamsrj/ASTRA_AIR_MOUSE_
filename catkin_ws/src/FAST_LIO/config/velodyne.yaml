@@ -10,7 +10,20 @@ preprocess:
     scan_line: 32
     scan_rate: 10                # only need to be set for velodyne, unit: Hz,
     timestamp_unit: 2            # the unit of time/t field in the PointCloud2 rostopic: 0-second, 1-milisecond, 2-microsecond, 3-nanosecond.
-    blind: 2
+    # blind was 2 (metres; preprocess.cpp compares squared range against blind*blind). Every
+    # LiDAR return within 2 m of the sensor was discarded before FAST-LIO ever saw it. In a 15x15 m
+    # arena with interior rooms the vehicle is routinely within 2 m of several walls at once, so in
+    # tight spots essentially the whole scan was thrown away and scan matching had nothing left to
+    # register against. Measured on run 10_50_06: at t=153.9 s FAST-LIO logged repeated
+    # "No Effective Points!" while the vehicle sat 0.20 m from a wall with 187 wall cells inside
+    # the 2 m blind radius; the pose then propagated on IMU alone, drifted ~8 m, and because
+    # relay_odometry.py feeds that pose to PX4 as /mavros/vision_pose/pose (EKF2_EV_CTRL=11),
+    # EKF2 diverged with it -- groundtruth had the vehicle hovering at 1.0 m while EKF2 reported
+    # 14.6 m/s and -2.3 m altitude. That is the "drone ends up stuck at the wall" failure.
+    # 0.5 m still rejects self-returns: the VLP-16 sits 0.12 m above base_link, the rotors are
+    # ~0.1 m below it at ~0.26 m radius with ~0.13 m props, so the lowest -15deg beam can clip a
+    # prop tip out to ~0.38 m. The Gazebo sensor itself reports from <min>0.1</min>.
+    blind: 0.5
 
 mapping:
     acc_cov: 0.1
@@ -32,6 +45,13 @@ publish:
     scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
 
 pcd_save:
-    pcd_save_en: true
+    # was true. With interval -1 this keeps EVERY scan of the whole flight in RAM (the comment
+    # below is upstream's own warning). Measured cost: a run reached 12 GB of 14 GB plus 4 GB of
+    # swap and was then OOM-killed at t=482 s -- "Killed" on all three roslaunch processes, which
+    # is how essentially every unattended run has been ending. The PCD is only written at clean
+    # shutdown, so an OOM-killed run pays the entire memory cost and produces no file at all:
+    # catkin_ws/src/FAST_LIO/PCD/ contains nothing from any run. Re-enable only for a short run
+    # that is stopped deliberately.
+    pcd_save_en: false
     interval: -1                 # how many LiDAR frames saved in each pcd file; 
                                  # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.

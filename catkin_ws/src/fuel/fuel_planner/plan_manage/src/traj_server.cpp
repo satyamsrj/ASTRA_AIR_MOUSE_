@@ -33,6 +33,11 @@ shared_ptr<PerceptionUtils> percep_utils_;
 // Info of replan
 bool receive_traj_ = false;
 double replan_time_;
+// Fixed-altitude 2D flight: hard Z pin, camera_init frame (world = z_cruise_ + 0.1). Initialized
+// here as well as from the param server because cmd_timer is created before the params are read in
+// main() -- cmdCallback's `if (!receive_traj_) return;` guard means it cannot actually publish that
+// early today, but a 0.0 default would mean commanding Z=0 if that guard ever changed.
+double z_cruise_ = 1.4;
 
 // Executed traj, commanded and real ones
 vector<Eigen::Vector3d> traj_cmd_, traj_real_;
@@ -312,6 +317,14 @@ void cmdCallback(const ros::TimerEvent& e) {
   cmd.acceleration.z = acc(2);
   cmd.yaw = yaw;
   cmd.yaw_dot = yawdot;
+
+  // Fixed-altitude 2D flight: force Z regardless of what the 3D bspline solved for, so
+  // /planning/pos_cmd structurally cannot carry a non-cruise Z. See
+  // PLANNING_DOCS/fixed_altitude_2d_flight_architecture_2026-09-03.md Sec 12.1.
+  cmd.position.z = z_cruise_;
+  cmd.velocity.z = 0.0;
+  cmd.acceleration.z = 0.0;
+
   pos_cmd_pub.publish(cmd);
 
   // Draw cmd
@@ -459,6 +472,8 @@ int main(int argc, char** argv) {
   nh.param("traj_server/init_x", init_pos[0], 0.0);
   nh.param("traj_server/init_y", init_pos[1], 0.0);
   nh.param("traj_server/init_z", init_pos[2], 0.0);
+  nh.param("traj_server/z_cruise", z_cruise_, 1.4);
+  init_pos[2] = z_cruise_;  // keep the very first published command already consistent
 
   ROS_WARN("[Traj server]: init...");
   ros::Duration(1.0).sleep();
@@ -489,24 +504,14 @@ int main(int argc, char** argv) {
   percep_utils_.reset(new PerceptionUtils(nh));
 
   // test();
-  // Initialization for exploration, move upward and downward
-  for (int i = 0; i < 100; ++i) {
-    cmd.position.z += 0.01;
-    pos_cmd_pub.publish(cmd);
-    ros::Duration(0.01).sleep();
-  }
-  for (int i = 0; i < 100; ++i) {
-    cmd.position.z -= 0.01;
-    pos_cmd_pub.publish(cmd);
-    ros::Duration(0.01).sleep();
-  }
-  // ros::Duration(1.0).sleep();
-  // for (int i = 0; i < 100; ++i)
-  // {
-  //   cmd.position.x -= 0.01;
-  //   pos_cmd_pub.publish(cmd);
-  //   ros::Duration(0.01).sleep();
-  // }
+  // Removed: an unconditional 1m climb-then-descend startup wiggle used to run here (upstream
+  // FUEL bring-up/demo leftover), publishing straight to /planning/pos_cmd before any real
+  // trajectory existed. It bypassed every altitude safeguard (frontier Z-band, virtual ceiling,
+  // the guard's clamp) since none of them run on this path, and test_takeoff.sh starts this node
+  // after the vehicle is already armed and in OFFBOARD, so it was a live, unconditional Z
+  // excursion on every mission. flight_envelope_guard.py's timer_cb already streams a safe hold
+  // setpoint whenever no fresh command has arrived, so nothing needs to replace this. See
+  // PLANNING_DOCS/fixed_altitude_2d_flight_architecture_2026-09-03.md Sec 11.
 
   R_loop = Eigen::Quaterniond(1, 0, 0, 0).toRotationMatrix();
   T_loop = Eigen::Vector3d(0, 0, 0);
