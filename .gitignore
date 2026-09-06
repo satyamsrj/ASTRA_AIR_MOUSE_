@@ -40,3 +40,4 @@ host_test.txt
 # Claude Code graphify analysis cache - regenerable, never commit
 graphify-out/
 graphify/
+PLANNING_DOCS/archive/
