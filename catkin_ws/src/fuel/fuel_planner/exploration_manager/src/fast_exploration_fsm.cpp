@@ -4,6 +4,9 @@
 #include <traj_utils/planning_visualization.h>
 
 #include <exploration_manager/fast_exploration_fsm.h>
+#include <std_msgs/Bool.h>
+#include <algorithm>
+#include <geometry_msgs/PoseStamped.h>
 #include <exploration_manager/expl_data.h>
 #include <plan_env/edt_environment.h>
 #include <plan_env/sdf_map.h>
@@ -27,6 +30,11 @@ void FastExplorationFSM::init(ros::NodeHandle& nh) {
   visualization_.reset(new PlanningVisualization(nh));
 
   planner_manager_ = expl_manager_->planner_manager_;
+  nh.param("fsm/finish_recheck_interval", finish_recheck_interval_, 2.0);
+  nh.param("fsm/finish_recheck_max", finish_recheck_max_, 15);
+  finish_recheck_count_ = 0;
+  finish_last_recheck_ = ros::Time::now();
+
   state_ = EXPL_STATE::INIT;
   fd_->have_odom_ = false;
   fd_->state_str_ = { "INIT", "WAIT_TRIGGER", "PLAN_TRAJ", "PUB_TRAJ", "EXEC_TRAJ", "FINISH" };
@@ -45,6 +53,34 @@ void FastExplorationFSM::init(ros::NodeHandle& nh) {
   replan_pub_ = nh.advertise<std_msgs::Empty>("/planning/replan", 10);
   new_pub_ = nh.advertise<std_msgs::Empty>("/planning/new", 10);
   bspline_pub_ = nh.advertise<bspline::Bspline>("/planning/bspline", 10);
+  // Latched: the EDM may well subscribe after we have already finished, and a one-shot
+  // non-latched Bool published into an empty subscriber list is simply lost - which would
+  // strand the vehicle hovering inside the arena with the mission believing it is still
+  // exploring. queue 1 + latch means a late subscriber still gets it.
+  completed_pub_ = nh.advertise<std_msgs::Bool>("/exploration_completed", 1, true);
+  next_view_pub_ = nh.advertise<geometry_msgs::PoseStamped>("/exploration/next_view", 10);
+  exploration_completed_sent_ = false;
+}
+
+// Clamp a MEASURED velocity to something the kinodynamic search can actually start from.
+//
+// KinodynamicAstar rejects any start state whose speed exceeds max_vel + vel_margin
+// (0.6 + 0.25 = 0.85 here) and returns NO_PATH immediately. FAST-LIO's ESEKF velocity is an
+// estimate, not the commanded value, and it overshoots: measured 2026-09-06 over one flight,
+// the failing replans had a median start speed of 0.933 m/s and 60 of 90 were above 0.85,
+// while ZERO of the 44 successful replans were -- a perfect separation. Plan success sat at
+// 30% purely because of it.
+//
+// The vehicle is commanded never to exceed max_vel, so an estimate above it is noise, not
+// motion. Clamp the magnitude and keep the direction, which is the part the planner and
+// ViewNode::computeCost's direction term actually need. Clamping to max_vel (not to
+// max_vel + vel_margin) deliberately leaves the margin as headroom for genuine overshoot.
+Eigen::Vector3d FastExplorationFSM::clampStartVel(const Eigen::Vector3d& v) const {
+  const double vmax = planner_manager_->pp_.max_vel_;
+  const double n = v.norm();
+  if (!std::isfinite(n)) return Eigen::Vector3d::Zero();
+  if (n <= vmax || n < 1e-6) return v;
+  return v * (vmax / n);
 }
 
 void FastExplorationFSM::FSMCallback(const ros::TimerEvent& e) {
@@ -69,6 +105,29 @@ void FastExplorationFSM::FSMCallback(const ros::TimerEvent& e) {
     }
 
     case FINISH: {
+      // Do not accept the first NO_FRONTIER as the end of the mission -- see the comment on
+      // finish_recheck_* in the header. Re-attempt planning a bounded number of times; the
+      // map keeps growing from the sensor stream while we wait, so frontiers that did not
+      // exist at the moment of the trigger will appear.
+      if (finish_recheck_count_ < finish_recheck_max_ &&
+          (ros::Time::now() - finish_last_recheck_).toSec() > finish_recheck_interval_) {
+        finish_last_recheck_ = ros::Time::now();
+        ++finish_recheck_count_;
+        ROS_WARN("[FSM] FINISH re-check %d/%d: retrying exploration planning.",
+                 finish_recheck_count_, finish_recheck_max_);
+        transitState(PLAN_TRAJ, "FSM");
+        break;
+      }
+      // Re-checks exhausted: this is a real finish, not a momentary frontier gap. Tell the
+      // mission layer exactly once, then keep holding.
+      if (!exploration_completed_sent_) {
+        exploration_completed_sent_ = true;
+        std_msgs::Bool done;
+        done.data = true;
+        completed_pub_.publish(done);
+        ROS_WARN("[FSM] exploration COMPLETE after %d re-checks: publishing "
+                 "/exploration_completed for the return leg.", finish_recheck_count_);
+      }
       ROS_INFO_THROTTLE(1.0, "finish exploration.");
       break;
     }
@@ -77,7 +136,7 @@ void FastExplorationFSM::FSMCallback(const ros::TimerEvent& e) {
       if (fd_->static_state_) {
         // Plan from static state (hover)
         fd_->start_pt_ = fd_->odom_pos_;
-        fd_->start_vel_ = fd_->odom_vel_;
+        fd_->start_vel_ = clampStartVel(fd_->odom_vel_);
         fd_->start_acc_.setZero();
 
         fd_->start_yaw_(0) = fd_->odom_yaw_;
@@ -86,6 +145,25 @@ void FastExplorationFSM::FSMCallback(const ros::TimerEvent& e) {
         // Replan from non-static state, starting from 'replan_time' seconds later
         LocalTrajData* info = &planner_manager_->local_data_;
         double t_r = (ros::Time::now() - info->start_time_).toSec() + fp_->replan_time_;
+
+        // BOUND t_r TO THE TRAJECTORY. NonUniformBspline::evaluateDeBoorT does not clamp its
+        // argument, so once t_r runs past duration_ -- which happens whenever a replan is late,
+        // and always once the vehicle has flown the whole trajectory while the planner kept
+        // failing -- the B-spline is evaluated outside its knot span and EXTRAPOLATES.
+        //
+        // Measured 2026-09-06 with this unbounded: the start velocity handed to the
+        // kinodynamic search had a median of 0.881 m/s, p90 of 3.12 and a maximum of 4.95 m/s
+        // on a vehicle whose max_vel is 0.6 -- physically impossible values, produced entirely
+        // by extrapolation. KinodynamicAstar rejects any start state above
+        // max_vel + vel_margin (0.85), so 87 of 173 replans were refused outright and plan
+        // success sat at 32%. The vehicle showed it as stopping and restarting, because a
+        // refused replan leaves it holding the previous trajectory's endpoint.
+        //
+        // Clamping the magnitude afterwards is not a substitute: an extrapolated velocity has
+        // a meaningless DIRECTION too, and the direction feeds both the search and
+        // ViewNode::computeCost's w_dir term. Bound the evaluation instead, so the state is
+        // the real end-of-trajectory state.
+        t_r = std::min(t_r, info->duration_);
 
         Eigen::Vector3d predicted_pt = info->position_traj_.evaluateDeBoorT(t_r);
 
@@ -104,7 +182,7 @@ void FastExplorationFSM::FSMCallback(const ros::TimerEvent& e) {
               "from real odometry instead of predicted trajectory state",
               (predicted_pt - fd_->odom_pos_).norm());
           fd_->start_pt_ = fd_->odom_pos_;
-          fd_->start_vel_ = fd_->odom_vel_;
+          fd_->start_vel_ = clampStartVel(fd_->odom_vel_);
           fd_->start_acc_.setZero();
           fd_->start_yaw_(0) = fd_->odom_yaw_;
           fd_->start_yaw_(1) = fd_->start_yaw_(2) = 0.0;
@@ -118,10 +196,20 @@ void FastExplorationFSM::FSMCallback(const ros::TimerEvent& e) {
         }
       }
 
+      // ONE clamp covering every branch above. The B-spline optimiser enforces max_vel as a
+      // SOFT cost, so info->velocity_traj_ can exceed it too -- and since 86% of replans take
+      // the trajectory branch, clamping only the odometry branch would have left most of the
+      // failures in place. Measured before this clamp: 90 of 119 replans failed, 60 of those
+      // with a start speed over the search's 0.85 m/s ceiling, against 0 of 44 successes.
+      fd_->start_vel_ = clampStartVel(fd_->start_vel_);
+
       // Inform traj_server the replanning
       replan_pub_.publish(std_msgs::Empty());
       int res = callExplorationPlanner();
       if (res == SUCCEED) {
+        // A successful plan means exploration is live again; allow the full re-check budget
+        // if we ever land back in FINISH later in the mission.
+        finish_recheck_count_ = 0;
         transitState(PUB_TRAJ, "FSM");
       } else if (res == NO_FRONTIER) {
         transitState(FINISH, "FSM");
@@ -189,6 +277,18 @@ int FastExplorationFSM::callExplorationPlanner() {
   // classic_);
 
   if (res == SUCCEED) {
+    // Timestamped record of the committed viewpoint, for post-run analysis. last_next_pos_ is
+    // the viewpoint planExploreMotion just committed to (it writes it immediately before the
+    // "Next view:" print), so this is the same target, with a timestamp attached.
+    geometry_msgs::PoseStamped nv;
+    nv.header.stamp = ros::Time::now();
+    nv.header.frame_id = "world";
+    nv.pose.position.x = expl_manager_->ed_->last_next_pos_(0);
+    nv.pose.position.y = expl_manager_->ed_->last_next_pos_(1);
+    nv.pose.position.z = expl_manager_->ed_->last_next_pos_(2);
+    nv.pose.orientation.z = sin(0.5 * expl_manager_->ed_->last_next_yaw_);
+    nv.pose.orientation.w = cos(0.5 * expl_manager_->ed_->last_next_yaw_);
+    next_view_pub_.publish(nv);
     auto info = &planner_manager_->local_data_;
     info->start_time_ = (ros::Time::now() - time_r).toSec() > 0 ? ros::Time::now() : time_r;
 
@@ -349,6 +449,22 @@ void FastExplorationFSM::frontierCallback(const ros::TimerEvent& e) {
 
 void FastExplorationFSM::triggerCallback(const nav_msgs::PathConstPtr& msg) {
   if (msg->poses[0].pose.position.z < -0.1) return;
+
+  // A trigger is an explicit instruction to explore, so it always renews the FINISH re-check
+  // budget and re-arms exploration even if the FSM has already given up.
+  //
+  // This matters because the FSM does not get triggered only by the mission. The
+  // waypoint_generator node advertises "waypoints" relative to its own name, which resolves to
+  // exactly this topic, so it self-triggers FUEL early -- on 2026-09-05 08:46 it fired 28 s
+  // before the vehicle had even taken off, and the entry module's real handover trigger was
+  // then silently discarded by the state_ != WAIT_TRIGGER guard below.
+  finish_recheck_count_ = 0;
+  if (state_ == FINISH) {
+    ROS_WARN("[FSM] Trigger received in FINISH; re-arming exploration.");
+    fd_->trigger_ = true;
+    transitState(PLAN_TRAJ, "triggerCallback");
+    return;
+  }
   if (state_ != WAIT_TRIGGER) return;
   fd_->trigger_ = true;
   cout << "Triggered!" << endl;
@@ -394,9 +510,20 @@ void FastExplorationFSM::odometryCallback(const nav_msgs::OdometryConstPtr& msg)
 
   fd_->odom_pos_ = new_pos;
 
-  fd_->odom_vel_(0) = msg->twist.twist.linear.x;
-  fd_->odom_vel_(1) = msg->twist.twist.linear.y;
-  fd_->odom_vel_(2) = msg->twist.twist.linear.z;
+  // Odometry.twist is expressed in child_frame_id (FAST-LIO sets that to "body"), but every
+  // consumer of odom_vel_ works in the world/map frame: it becomes start_vel_ for the
+  // kinodynamic search, and v1 in ViewNode::computeCost where it is compared against a
+  // world-frame bearing. Rotate it here rather than at any of those use sites.
+  // Until 2026-09-06 FAST-LIO left twist at zero, so this read 0 unconditionally -- see the
+  // comment at the publish site in laserMapping.cpp for what that cost.
+  {
+    const Eigen::Quaterniond q_wb(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x,
+                                  msg->pose.pose.orientation.y, msg->pose.pose.orientation.z);
+    const Eigen::Vector3d v_world = q_wb * Eigen::Vector3d(msg->twist.twist.linear.x,
+                                                           msg->twist.twist.linear.y,
+                                                           msg->twist.twist.linear.z);
+    fd_->odom_vel_ = v_world;
+  }
 
   fd_->odom_orient_.w() = msg->pose.pose.orientation.w;
   fd_->odom_orient_.x() = msg->pose.pose.orientation.x;

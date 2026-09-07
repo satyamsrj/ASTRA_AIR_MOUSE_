@@ -776,7 +776,24 @@ int FrontierFinder::countVisibleCells(
     raycaster_->input(cell, pos);
     bool visib = true;
     while (raycaster_->nextId(idx)) {
-      if (edt_env_->sdf_map_->getInflateOccupancy(idx) == 1 ||
+      // Line of sight is a property of the WORLD, not of the vehicle's girth. This test used
+      // getInflateOccupancy(), which made obstacles_inflation do three unrelated jobs at once:
+      // path collision, viewpoint validity, and ray occlusion. The first two must scale with
+      // the airframe; the third must not.
+      //
+      // In a tight arena that coupling is fatal. With obstacles_inflation = 0.42 (the
+      // vehicle's 0.384 m radius plus margin), 51.9% of ARINA_NIDAR's free space is
+      // inflate-occupied, and any corridor narrower than 2 x 0.42 = 0.84 m is SOLID to the
+      // raycaster. No viewpoint can then see any frontier through it, every candidate is
+      // rejected as LowVis, no trajectory is ever produced, and the vehicle hovers
+      // indefinitely while the frontier finder still reports frontiers to visit.
+      // Observed 2026-09-05 11:17 onward: "Generated: 222 | Accepted: 0 | Coll: 129 |
+      // Clearance: 74 | LowVis: 19" with 55037 consecutive "plan fail".
+      //
+      // Occupancy (not inflated) is the correct occlusion test. Viewpoint POSITIONS are still
+      // validated against the inflated map above, so the vehicle is never asked to occupy a
+      // space it does not fit in -- only its eyes are allowed through gaps its body is not.
+      if (edt_env_->sdf_map_->getOccupancy(idx) == SDFMap::OCCUPIED ||
           edt_env_->sdf_map_->getOccupancy(idx) == SDFMap::UNKNOWN) {
         visib = false;
         break;

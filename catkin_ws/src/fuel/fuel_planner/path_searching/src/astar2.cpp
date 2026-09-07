@@ -1,6 +1,9 @@
 #include <path_searching/astar2.h>
 #include <sstream>
 #include <plan_env/sdf_map.h>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 
 using namespace std;
 using namespace Eigen;
@@ -19,6 +22,9 @@ void Astar::init(ros::NodeHandle& nh, const EDTEnvironment::Ptr& env) {
   nh.param("astar/lambda_heu", lambda_heu_, -1.0);
   nh.param("astar/max_search_time", max_search_time_, -1.0);
   nh.param("astar/allocate_num", allocate_num_, -1);
+  // Default sized to just over one inflation radius: enough to step out of the inflated band
+  // around a wall, not enough to jump the vehicle through one.
+  nh.param("astar/escape_radius", escape_radius_, 0.6);
 
   tie_breaker_ = 1.0 + 1.0 / 1000;
 
@@ -44,11 +50,70 @@ void Astar::setResolution(const double& res) {
   this->inv_resolution_ = 1.0 / resolution_;
 }
 
+bool Astar::isAdmissible(const Eigen::Vector3d& pt) {
+  return edt_env_->sdf_map_->isInBox(pt) &&
+      edt_env_->sdf_map_->getInflateOccupancy(pt) != 1 &&
+      edt_env_->sdf_map_->getOccupancy(pt) != SDFMap::UNKNOWN;
+}
+
+bool Astar::findNearestAdmissible(const Eigen::Vector3d& from, Eigen::Vector3d& out) {
+  // Expanding shells at the search resolution. Deliberately capped: if nothing admissible is
+  // within escape_radius_ the vehicle is genuinely lost and silently teleporting the plan
+  // origin several metres would be worse than reporting no path.
+  const int max_ring = std::max(1, int(std::ceil(escape_radius_ / resolution_)));
+  double best_d = std::numeric_limits<double>::max();
+  bool found = false;
+  for (int r = 1; r <= max_ring; ++r) {
+    for (int i = -r; i <= r; ++i)
+      for (int j = -r; j <= r; ++j)
+        for (int k = -r; k <= r; ++k) {
+          // shell only -- interior rings were covered by earlier iterations
+          if (std::max({ std::abs(i), std::abs(j), std::abs(k) }) != r) continue;
+          Eigen::Vector3d cand = from + resolution_ * Eigen::Vector3d(i, j, k);
+          if (!isAdmissible(cand)) continue;
+          double d = (cand - from).norm();
+          if (d < best_d) { best_d = d; out = cand; found = true; }
+        }
+    if (found) return true;   // nearest shell containing anything admissible wins
+  }
+  return false;
+}
+
 int Astar::search(const Eigen::Vector3d& start_pt, const Eigen::Vector3d& end_pt) {
+  // A* only ever tests NEIGHBOURS for admissibility, never the start itself. When the vehicle
+  // is parked inside the inflated obstacle band every neighbour is rejected, the open set
+  // empties immediately and this returns NO_PATH on every single replan -- with no log line
+  // distinguishing it from a genuinely disconnected goal.
+  //
+  // 2026-09-05, measured: after entering this arena the vehicle sat 0.340 m from a wall (inside
+  // its own 0.384 m radius, in a 0.63 m corridor) and produced 33320 consecutive "No path to
+  // next viewpoint" against 2 successful plans. Nudging the plan origin to the nearest
+  // admissible cell is the general fix; tuning where the entry module stops the vehicle is not,
+  // because it re-breaks whenever the arena geometry changes.
+  //
+  // The true start is prepended to the path afterwards, so the returned trajectory still begins
+  // at the vehicle and the caller sees no discontinuity.
+  Eigen::Vector3d search_start = start_pt;
+  const bool nudged = !isAdmissible(start_pt);
+  if (nudged && !findNearestAdmissible(start_pt, search_start)) {
+    ROS_WARN_THROTTLE(2.0,
+                      "[Astar] start (%.2f %.2f %.2f) is blocked and no admissible cell within "
+                      "%.2f m; cannot plan.",
+                      start_pt.x(), start_pt.y(), start_pt.z(), escape_radius_);
+    return NO_PATH;
+  }
+  if (nudged) {
+    ROS_WARN_THROTTLE(2.0,
+                      "[Astar] start (%.2f %.2f %.2f) was inside the inflated band; planning "
+                      "from nearest free cell (%.2f %.2f %.2f), %.2f m away.",
+                      start_pt.x(), start_pt.y(), start_pt.z(), search_start.x(),
+                      search_start.y(), search_start.z(), (search_start - start_pt).norm());
+  }
+
   NodePtr cur_node = path_node_pool_[0];
   cur_node->parent = NULL;
-  cur_node->position = start_pt;
-  posToIndex(start_pt, cur_node->index);
+  cur_node->position = search_start;
+  posToIndex(search_start, cur_node->index);
   cur_node->g_score = 0.0;
   cur_node->f_score = lambda_heu_ * getDiagHeu(cur_node->position, end_pt);
 
@@ -68,6 +133,8 @@ int Astar::search(const Eigen::Vector3d& start_pt, const Eigen::Vector3d& end_pt
         abs(cur_node->index(1) - end_index(1)) <= 1 && abs(cur_node->index(2) - end_index(2)) <= 1;
     if (reach_end) {
       backtrack(cur_node, end_pt);
+      // Re-attach the vehicle's real position so the trajectory starts where it actually is.
+      if (nudged) path_nodes_.insert(path_nodes_.begin(), start_pt);
       return REACH_END;
     }
 

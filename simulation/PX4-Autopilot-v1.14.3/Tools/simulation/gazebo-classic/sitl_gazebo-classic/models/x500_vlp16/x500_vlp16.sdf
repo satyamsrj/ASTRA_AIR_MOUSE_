@@ -1,0 +1,317 @@
+<?xml version="1.0" ?>
+<!--
+  X500 + Velodyne VLP-16. First step of the migration off iris_vlp16_cam: frame and lidar only.
+  Full payload: VLP-16 on a mast, TFmini and A8 mini camera under the centre plate.
+  Every mount height here is derived from measured mesh geometry; see each block.
+
+  LIDAR HEIGHT IS SET BY THE PROPS, NOT BY TASTE. The full derivation, from both the prop
+  collision discs and the prop visual meshes, is on the velodyne_link block below. Short form:
+  the -15 deg ring must clear the outermost blade, which needs z > 0.1376; it is at 0.20.
+  (That floor was 0.1668 before the 2026-09-06 airframe shrink. Smaller props pull the tip
+  inward, so the ring clears sooner and the mount height did not need to move.)
+  The iris got away with 0.12 only because its rotors sat much lower (z = 0.023).
+  Anything that moves the rotors, lengthens the props, or lowers this mount must redo that sum.
+
+  FAST-LIO's mapping/extrinsic_T must match this height. It is NOT updated automatically:
+  see nidar/lidar/extrinsic_T in mission_config.yaml.
+-->
+<sdf version="1.6">
+  <model name="x500_vlp16">
+    <include>
+      <uri>model://x500</uri>
+    </include>
+
+    <link name="velodyne_link">
+      <!-- HEIGHT IS SET BY THE PROPS. Measured from the real x500 geometry, not guessed.
+           UPDATED 2026-09-06 for the shrunk airframe (hub +-0.120, prop 0.200 m diameter):
+             prop COLLISION disc r = 0.100, hub at r = hypot(.120,.120) = 0.16971,
+                                 so the disc sweeps out to r = 0.2697 at z = 0.0625
+             prop VISUAL  mesh   scaled 0.716253, outer tip now r = 0.2546, z top 0.0694
+           The lowest ring leaves at -15 deg, so at radius r it has fallen r*tan(15) = 0.26795*r.
+           Clearing the outermost blade needs
+                 collision:  z > 0.0625 + 0.2697*0.26795 = 0.1348
+                 visual:     z > 0.0694 + 0.2546*0.26795 = 0.1376   <- governs
+           At z = 0.20 that is 62 mm of clear air over the blade, up from 33 mm before the
+           shrink: smaller props move the tip inward, so the ring clears sooner. The mount
+           height did NOT have to change. No scan line is chopped anywhere in the annulus.
+           The previous 0.0889 (set by hand in the placement rig) crossed the prop plane at
+           r = 0.108 m, right at the inner edge of the blade sweep, so the lower rings were cut
+           across nearly the whole annulus. Restored to 0.20.
+           x and y are zeroed: the rig left 0.7 mm / 0.1 mm of drag noise there, and a spinning
+           lidar wants to be on the roll/pitch axis, not 0.7 mm off it.
+           DO NOT EDIT THIS POSE BY HAND. It is generated from nidar.lidar.mount_height in
+           mission_config.yaml, together with the mast length below and FAST-LIO's
+           mapping/extrinsic_T, which must equal it exactly. Change the height there and run
+               rosrun nidar_mission apply_mission_config.py
+           which also refuses any height that puts the lowest ring back into the props. -->
+      <pose>0 0 0.2 0 0 0</pose>
+      <inertial>
+        <mass>0.23</mass>
+        <!-- Solid cylinder, r = 0.025, l = 0.0717, m = 0.23:
+             ixx = iyy = m(3r^2 + l^2)/12 = 0.0001344,  izz = m r^2/2 = 0.00007188.
+             Recomputed when the radius was reduced from 0.0516; leaving the old 0.000908 would
+             have described a body twice this wide.
+
+             MASS REDUCED 0.83 -> 0.23 kg on 2026-09-06 together with the airframe shrink. 0.83
+             is a real VLP-16; 0.23 represents a compact solid-state unit of the Livox Mid-360
+             class, which is what a 0.54 m airframe would actually carry. The inertia was
+             rescaled by the same 0.2771 factor; do NOT change the mass without it, or you
+             describe a 0.23 kg object that spins like an 0.83 kg one.
+             Total vehicle mass 3.0043 -> 2.4043 kg, so T/W rises 1.90 -> 2.37 and
+             MPC_THR_HOVER must drop to 0.55 (see the airframe file). -->
+        <inertia>
+          <ixx>0.0001344</ixx>
+          <iyy>0.0001344</iyy>
+          <izz>0.00007188</izz>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyz>0</iyz>
+        </inertia>
+      </inertial>
+
+      <visual name="velodyne_visual">
+        <geometry>
+          <cylinder>
+            <radius>0.025</radius>
+            <length>0.0717</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/DarkGrey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+
+      <!-- Standoff mast: the support the lidar actually stands on. Prop clearance forces the
+           sensor up to 0.20 while the centre plate top is at z = 0.032, so without this the
+           lidar floats 0.13 m over the airframe with nothing holding it up.
+           GENERATED, like the pose above: it runs from the plate top to the bottom of the
+           sensor body, so raising mount_height lengthens the mast to match.
+               length = mount_height - 0.0717/2 - 0.032
+               pose z = 0.032 + length/2 - mount_height     (velodyne_link's frame)
+           Visual only, on purpose. Mass and collision here would move the CoM and add contact
+           geometry overlapping base_link for no gain: at r = 0.008 the mast is inside the
+           sensor's own min_range, so the lidar can never see it either way. -->
+      <visual name="velodyne_mast_visual">
+        <pose>0 0 -0.101925 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.008</radius>
+            <length>0.13215</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Grey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+
+      <sensor type="ray" name="velodyne-VLP16">
+        <pose>0 0 0 0 0 0</pose>
+        <visualize>false</visualize>
+        <update_rate>10</update_rate>
+        <ray>
+          <scan>
+            <horizontal>
+              <samples>1800</samples>
+              <resolution>1</resolution>
+              <min_angle>-3.14159265359</min_angle>
+              <max_angle>3.14159265359</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>16</samples>
+              <resolution>1</resolution>
+              <min_angle>-0.261799</min_angle>
+              <max_angle>0.261799</max_angle>
+            </vertical>
+          </scan>
+          <range>
+            <min>0.05</min>
+            <max>30</max>
+            <resolution>0.001</resolution>
+          </range>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.008</stddev>
+          </noise>
+        </ray>
+        
+        <plugin name="gazebo_ros_laser_controller" filename="libgazebo_ros_velodyne_laser.so">
+          <topicName>/velodyne_points</topicName>
+          <frameName>velodyne_link</frameName>
+          <min_range>0.05</min_range>
+          <max_range>30</max_range>
+          <gaussianNoise>0.008</gaussianNoise>
+        </plugin>
+      </sensor>
+    </link>
+
+    <joint name="velodyne_joint" type="fixed">
+      <parent>x500::base_link</parent>
+      <child>velodyne_link</child>
+    </joint>
+
+    <!-- TFmini Plus downward rangefinder, on the underside of the X500 centre plate.
+
+         PLACEMENT, derived from geometry rather than guessed:
+           * The mesh's lens pair is on its -X face (two identical r = 8.4 mm circles), so the
+             model.sdf visual is rotated Ry(-90 deg) to bring that face down in line with the
+             ray. The face that then points UP, and therefore mates with the airframe, is +X
+             (the connector/back face).
+           * X500 base_link_collision_0 is a 0.05 m box at z = +0.007, so the centre plate's
+             UNDERSIDE is z = -0.018.
+           * Rotated device height is 0.025 m, so seating its top flush against that plate puts
+             the link at -0.018 - 0.0125 = -0.0305, and the lens face at -0.043.
+
+         PARKED CLEARANCE, which is what killed this on the iris: the skid rails sit at
+         z = -0.2195, so on the ground the lens is 0.2195 - 0.043 = 0.1765 m up. That is 76 mm
+         clear of the TFmini's own 0.10 m minimum range, versus the 0.0584 m (BELOW the floor)
+         the iris build produced, where FAST-LIO rejected every sample, lost its Z pin and the
+         vehicle diverged. The X500's taller stance is what buys that margin.
+
+         NAMING IS LOAD-BEARING on both sides. gazebo_mavlink_interface scans model joints for
+         .*(lidar|sf10a)(.*), strips "_joint" and subscribes to ~/<model>/link/<that name>,
+         while gazebo_lidar_plugin publishes from the scoped link name. "tfmini_lidar_joint"
+         paired with model "tfmini_lidar" is what makes those meet. Rename either and PX4
+         silently receives no DISTANCE_SENSOR while ROS /tfmini/range keeps working, leaving
+         EKF2_HGT_REF=2 with no height source at all. -->
+    <include>
+      <uri>model://tfmini_lidar</uri>
+      <!-- Placed in the rig on 2026-09-06. roll = -1.5369 is the 90 deg that turns the
+           lens pair to face the ground; see the face survey in tfmini_lidar/model.sdf. -->
+      <pose>-0.0328 -0.0005 -0.0573 -1.5369 -0.0046 0.0061</pose>
+    </include>
+
+    <joint name="tfmini_lidar_joint" type="fixed">
+      <parent>x500::base_link</parent>
+      <child>tfmini_lidar::link</child>
+    </joint>
+
+    <!-- SIYI A8 mini, on the underside of the X500 centre plate.
+
+         WHICH FACE MATES, determined from the mesh rather than assumed. Face survey of
+         siyi_a8_mini.stl (51176 tris) measuring flat area per bbox face:
+             -Z  0.00222 m2  (70% of that face)   <- much the flattest: the MOUNTING PLATE
+             +Z  0.00067 m2  (21%)
+             -X  0.00065 m2  (13%)   +X 0.00043 (8%)   -Y 0.00051 (12%)   +Y 0.00016 (4%)
+         Curved geometry is 21.6% of total area, centred at z = +0.020 in the authored pose:
+         that is the gimbal ball sitting ABOVE the plate. So as authored the part stands plate
+         DOWN, ball up, the way it would sit on a bench.
+         Hanging it under an airframe therefore needs it INVERTED: roll = pi puts the plate on
+         top (z = +0.0113) to meet the airframe and drops the ball below.
+
+         PLACEMENT:
+           X500 centre-plate underside is z = -0.018, so link z = -0.018 - 0.0113 = -0.0293
+           and the body hangs to z = -0.1020, still 0.1175 m above the skid rails at -0.2195.
+           x = 0.08 puts it forward of the TFmini (which spans x -0.0175..+0.0175), leaving a
+           0.0381 m gap, and well inside the 0.177 m half-width of the plate.
+
+         This is the placement that repeatedly went wrong on the iris. There the +Z face was
+         assumed to be the mount, which buried the body in the fuselage; and with no landing
+         gear the camera became the touchdown point, so the vehicle sat nose-down on it at
+         ~12 deg and PX4 refused to arm. Here the skids carry the vehicle and the camera hangs
+         free between them. -->
+    <link name="camera_link">
+      <pose>0.0231 0.0043 -0.0518 3.1332 -0.0015 -3.0737</pose>
+      <inertial>
+        <mass>0.095</mass>
+        <inertia>
+          <ixx>6.5e-05</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>6.5e-05</iyy>
+          <iyz>0</iyz>
+          <izz>4.8e-05</izz>
+        </inertia>
+      </inertial>
+
+      <collision name="camera_collision">
+        <geometry>
+          <box>
+            <size>0.052 0.061 0.084</size>
+          </box>
+        </geometry>
+      </collision>
+
+      <visual name="camera_visual">
+        <geometry>
+          <mesh>
+            <uri>model://iris_vlp16_cam/meshes/siyi_a8_mini.stl</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/DarkGrey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+
+      <sensor name="camera" type="camera">
+        <!-- WHERE THE CAMERA ACTUALLY LOOKS. The mesh orientation is cosmetic; this pose
+             decides the optical axis, and the Gazebo GUI cannot show it, so it has to be
+             solved rather than eyeballed.
+             Two bugs were fixed here on 2026-09-06:
+               1. the old value carried roll=pi on TOP of the link's own roll=pi. The two
+                  cancel, and conjugating Ry by Rx(pi) flips the pitch sign, so the camera
+                  looked 15 deg UP instead of down.
+               2. the link pose set in the rig carries yaw = -3.0737 as well as roll = pi,
+                  which together are a 180 deg flip about Y, so the camera also faced
+                  BACKWARDS (azimuth -176 deg).
+             Solved against the link pose actually in use, by requiring the world optical axis
+             to be (cos15, 0, -sin15):
+                 R_sensor . x_hat = R_link^-1 . (0.9659, 0, -0.2588)
+             Verified with the real SDF composition Rz(yaw).Ry(pitch).Rx(roll):
+                 world axis (+0.9659, +0.0000, -0.2588) = elevation -15.0 deg, azimuth 0.0 deg.
+             RE-SOLVE THIS IF THE LINK POSE CHANGES: the two are coupled, and a link rotation
+             that looks harmless in the GUI silently re-aims the camera. -->
+        <pose>0 0 0 0 -0.259724 -3.071500</pose>
+        <always_on>1</always_on>
+        <update_rate>15</update_rate>
+        <visualize>false</visualize>
+        <camera name="a8_mini">
+          <horizontal_fov>1.4137</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.05</near>
+            <far>100</far>
+          </clip>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.007</stddev>
+          </noise>
+        </camera>
+        <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+          <alwaysOn>true</alwaysOn>
+          <updateRate>15</updateRate>
+          <cameraName>camera</cameraName>
+          <imageTopicName>image_raw</imageTopicName>
+          <cameraInfoTopicName>camera_info</cameraInfoTopicName>
+          <frameName>camera_link</frameName>
+          <hackBaseline>0.0</hackBaseline>
+          <distortionK1>0.0</distortionK1>
+          <distortionK2>0.0</distortionK2>
+          <distortionK3>0.0</distortionK3>
+          <distortionT1>0.0</distortionT1>
+          <distortionT2>0.0</distortionT2>
+        </plugin>
+      </sensor>
+    </link>
+
+    <joint name="camera_joint" type="fixed">
+      <parent>x500::base_link</parent>
+      <child>camera_link</child>
+    </joint>
+  </model>
+</sdf>

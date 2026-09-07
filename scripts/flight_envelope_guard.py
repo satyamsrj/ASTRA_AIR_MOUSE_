@@ -75,6 +75,17 @@ class FlightEnvelopeGuard:
         self.world_z_min = rospy.get_param(param_ns + 'world_z_min', 1.45)
         self.world_z_max = rospy.get_param(param_ns + 'world_z_max', 1.55)
 
+        # Spawn pose in world coordinates. FAST-LIO plants camera_init wherever the vehicle
+        # sits when it initialises, so the camera_init <-> world transform below is entirely
+        # determined by this. It used to be the bare literal 6.5 inside camera_to_world(),
+        # which silently became wrong the moment the vehicle stopped spawning at (0, -6.5) --
+        # e.g. moving it onto a launch pad outside the arena. Defaults preserve the historical
+        # in-arena spawn so behaviour is unchanged when the params are absent.
+        # Populated from nidar/launch_pad/center in mission_config.yaml.
+        self.spawn_world_x = rospy.get_param(param_ns + 'spawn_world_x', 0.0)
+        self.spawn_world_y = rospy.get_param(param_ns + 'spawn_world_y', -6.5)
+        self.spawn_world_z = rospy.get_param(param_ns + 'spawn_world_z', 0.1)
+
         self.boundary_margin = rospy.get_param(param_ns + 'boundary_margin', 0.2)
         self.boundary_margin_z = rospy.get_param(param_ns + 'boundary_margin_z', 0.2)
         self.publish_rate = rospy.get_param(param_ns + 'publish_rate', 20.0)
@@ -176,17 +187,23 @@ class FlightEnvelopeGuard:
         rospy.on_shutdown(self.diag_file.close)
 
     def camera_to_world(self, xc, yc, zc):
-        """Rigid transformation from camera_init to Gazebo world frame."""
-        xw = -yc
-        yw = xc - 6.5
-        zw = zc + 0.1
+        """Rigid transformation from camera_init to Gazebo world frame.
+
+        camera_init is planted by FAST-LIO at the spawn pose, with the vehicle facing
+        world +Y (spawn yaw = pi/2), so camera_init +x points along world +y and
+        camera_init +y points along world -x. The offsets are the spawn position, which
+        is a parameter rather than a literal -- see spawn_world_* in __init__.
+        """
+        xw = self.spawn_world_x - yc
+        yw = self.spawn_world_y + xc
+        zw = self.spawn_world_z + zc
         return xw, yw, zw
 
     def world_to_camera(self, xw, yw, zw):
         """Inverse rigid transformation from Gazebo world to camera_init frame."""
-        xc = yw + 6.5
-        yc = -xw
-        zc = zw - 0.1
+        xc = yw - self.spawn_world_y
+        yc = self.spawn_world_x - xw
+        zc = zw - self.spawn_world_z
         return xc, yc, zc
 
     def _slew_limit_yaw(self, raw_yaw):

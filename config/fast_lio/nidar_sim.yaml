@@ -9,7 +9,12 @@ preprocess:
     scan_line: 16                # VLP-16 has 16 rings
     scan_rate: 10                # 10Hz rotation speed
     timestamp_unit: 1
-    blind: 0.35                  # Ignore points closer than 0.35m (clears propellers)
+    # Ignore returns closer than this. It no longer has to cover the propellers: with the
+    # lidar at z = 0.20 the -15 deg ring clears the outermost blade by 36 mm, so there are no
+    # prop self-returns to reject (derivation in x500_vlp16.sdf). Kept small because the
+    # opposite failure is the expensive one - at 2.0 the vehicle threw away whole scans when
+    # close to a wall, FAST-LIO logged "No Effective Points!" and the pose ran away.
+    blind: 0.05
 
 mapping:
     acc_cov: 0.1
@@ -17,9 +22,43 @@ mapping:
     b_acc_cov: 0.0001
     b_gyr_cov: 0.0001
     fov_degree: 360
-    det_range: 130.0
+    det_range: 30
+    # ---- ALTITUDE DATUM (generated from mission_config.yaml) ------------------------
+    # FAST-LIO does not publish its own SLAM Z: it pins Z to the TFmini, as
+    #     z_camera_init = range + tfmini_mount_offset - camera_init_world_z
+    # so these two numbers alone decide what altitude the whole stack believes it is at.
+    # camera_init_world_z is the spawn height (pad thickness + belly clearance) and must equal
+    # flight_envelope_guard's spawn_world_z and the world->map static TF's z.
+    # Both were iris values (0.05 / 0.1) until 2026-09-06; on the X500 that published Z 0.15 m
+    # high, which put FUEL's replan start point above its own map ceiling and stalled the
+    # kinodynamic search on 99.2% of attempts. See laserMapping.cpp for the measurements.
+    tfmini_mount_offset: 0.0573
+    camera_init_world_z: 0.26
+    # The sensor's own usable band, used to reject the ray sensor's no-return sentinel rather
+    # than pinning altitude to it (that put the published Z at 34.95 m on 2026-09-04).
+    tfmini_range_min: 0.1
+    tfmini_range_max: 12
     extrinsic_est_en: false      # We know the exact physical distance
-    extrinsic_T: [0.0, 0.0, 0.12]
+    # IMU -> LiDAR extrinsic. THIS IS THE CALIBRATION, and it is not optional: with
+    # extrinsic_est_en false FAST-LIO takes it as truth, and every metre of error here
+    # becomes a lever arm that turns rotation into fake translation.
+    #
+    # Translation: velodyne_link sits at (0, 0, 0.20) in x500_vlp16.sdf. The value must equal
+    # that pose. It read 0.12 until 2026-09-06, which was the IRIS mount height -- carried
+    # over unchanged through the whole X500 migration, so the lidar was modelled 8 cm below
+    # where it actually is and every yaw sweep injected a spurious ~cm-scale translation.
+    #
+    # Why base_link and not /imu_link (which the SDF puts at z = 0.02): imu_topic is
+    # /mavros/imu/data, and PX4 has no IMU lever arm configured (EKF2_IMU_POS_* unset), so
+    # everything upstream and downstream -- EKF2, and relay_odometry.py feeding FAST-LIO's
+    # output back as /mavros/vision_pose/pose -- treats the IMU as being AT base_link.
+    # Measuring from base_link keeps that one convention; measuring from /imu_link would
+    # leave a fixed 2 cm z bias in the vision pose instead.
+    #
+    # Rotation: velodyne_link carries rpy 0 0 0 relative to base_link, and mavros publishes
+    # IMU data in the same FLU body frame, so the correct extrinsic_R is exactly identity.
+    # Verify with:  rosrun tf tf_echo base_link velodyne_link
+    extrinsic_T: [ 0, 0, 0.2]
     extrinsic_R: [1, 0, 0,
                   0, 1, 0,
                   0, 0, 1]

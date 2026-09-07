@@ -51,6 +51,27 @@
       </inertial>
 
       <visual name="visual">
+        <!-- The STL is authored with its origin at a CORNER (measured bbox 0..25, 0..21, 0..35
+             raw units), while the collision box below is centred on the link origin. Without
+             this offset the drawn body sat half a box-height above its own collision volume,
+             which is how the sensor ended up looking buried in the airframe while its collision
+             said otherwise. Shift by -half the scaled extent on each axis to centre them. -->
+        <!-- MOUNTING ORIENTATION, derived from the mesh itself, not assumed.
+             Face survey of tfmini.stl (1636 tris, bbox 25 x 21 x 35 mm, corner origin):
+               -X : TWO identical circles, r = 8.4 mm, at (y,z) = (4.8, 7.3) and (4.8, 27.7).
+                    Identical size and count = the transmit/receive LENS PAIR. This face is
+                    the optical face and MUST point along the beam.
+               +X : one r = 12.5 mm plus one r = 4.7 mm, i.e. connector and a fixing hole.
+                    This is the back, so it is the face that mates with the airframe plate.
+             So the optical axis is the mesh's X, while the ray sensor below points down the
+             link's -Z (its own pose carries pitch +90 deg). Left unrotated the drawn body
+             therefore faced sideways while the beam went down: the mesh and the measurement
+             disagreed by exactly 90 deg.
+             Ry(-90 deg) maps mesh -X onto -Z, so the lens pair ends up at the BOTTOM
+             (verified: a lens-face point maps to z = 0.0000, the minimum of the rotated
+             extent 0.0000 .. 0.0250). The translation re-centres the corner-origin mesh on
+             the link after that rotation. -->
+        <pose>0.0175 -0.0105 -0.0125 0 -1.5707963 0</pose>
         <geometry>
           <mesh>
             <uri>model://tfmini_lidar/meshes/tfmini.stl</uri>
@@ -73,15 +94,27 @@
       <collision name="collision">
         <geometry>
           <box>
-            <size>0.025 0.021 0.035</size>
+            <!-- Rotated dimensions: the visual is turned Ry(-90 deg) so the 25 mm optical
+                 axis is now vertical and the 35 mm axis is horizontal. Box follows the mesh,
+                 or the two disagree again. -->
+            <size>0.035 0.021 0.025</size>
           </box>
         </geometry>
       </collision>
 
       <sensor name="tfmini_lidar" type="ray">
-        <!-- Pitch +90 deg so the beam points straight down, matching the stock lidar/sf10a
-             models' convention. -->
-        <pose>0 0 0 0 1.57079633 0</pose>
+        <!-- BEAM DIRECTION. This is coupled to the MOUNT pose in the vehicle SDF and must be
+             re-solved whenever that changes: the sensor is a child of the link, so rotating the
+             link to make the body look right also swings the beam.
+             Measured 2026-09-06: the mount was given roll = -1.5369 to turn the lens pair
+             groundward, which left the old "pitch 90" beam pointing at
+             (+0.006, -0.999, -0.034), i.e. 1.9 deg below horizontal. Parked, it read 5.7955 m
+             off a distant wall instead of 0.15 m off the pad. With EKF2_HGT_REF=2 that is the
+             only height source, so it would have flown on a sideways altimeter.
+             Solved for the mount actually in use:
+                 R_sensor . x_hat = R_link^-1 . (0, 0, -1)
+             giving pitch 0.033896, yaw 1.575399, verified beam (0, 0, -1.0000), -90.0 deg. -->
+        <pose>0 0 0 0 0.033896 1.575399</pose>
         <always_on>1</always_on>
         <update_rate>20</update_rate>
         <visualize>false</visualize>

@@ -3,11 +3,23 @@
 
 flight_envelope_guard:
   frame_id: "world"
+
+  # Spawn pose in world coordinates. FAST-LIO plants camera_init wherever the vehicle sits
+  # when it initialises, so this fully determines the camera_init <-> world transform used by
+  # camera_to_world()/world_to_camera(). It replaces what used to be a bare 6.5 literal inside
+  # those functions, which silently became wrong as soon as the vehicle stopped spawning at
+  # (0, -6.5) -- e.g. when it moved onto a launch pad outside the arena.
+  # GENERATED from nidar/launch_pad/center by nidar_mission/scripts/apply_mission_config.py.
+  # The world->map static TF in launch/nidar_fuel_upstream.launch must match these exactly;
+  # the generator writes both from the same source for that reason.
+  spawn_world_x: 0.0
+  spawn_world_y: -9.5
+  spawn_world_z: 0.26
   
   # Authoritative Gazebo World Frame Boundaries
   world_x_min: -7.0
   world_x_max: 7.0
-  world_y_min: -7.0
+  world_y_min: -10.5
   world_y_max: 7.0
   # Fixed-altitude 2D flight (2026-09-03): reverted to the original pre-3D-exploration band --
   # traj_server.cpp now hard-pins every published Z to 1.4 (camera_init)/1.5 (world), so this is a
@@ -28,7 +40,7 @@ flight_envelope_guard:
   boundary_margin_z: 0.03
   publish_rate: 20.0
   default_altitude: 1.5
-  max_yaw_rate: 1.5
+  max_yaw_rate: 1.047
   vision_timeout: 1.0
   # Range-staleness watchdog (mirrors vision_timeout above) -- required now that TFmini is PX4's
   # sole height reference (EKF2_HGT_REF=2, no automatic Vision fallback inside PX4 for height).

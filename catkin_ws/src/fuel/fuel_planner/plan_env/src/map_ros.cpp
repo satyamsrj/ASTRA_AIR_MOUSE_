@@ -4,6 +4,8 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <visualization_msgs/Marker.h>
+#include <std_msgs/Float64MultiArray.h>
+#include <algorithm>
 
 #include <fstream>
 
@@ -59,6 +61,19 @@ void MapROS::init() {
   esdf_timer_ = node_.createTimer(ros::Duration(0.05), &MapROS::updateESDFCallback, this);
   vis_timer_ = node_.createTimer(ros::Duration(0.05), &MapROS::visCallback, this);
 
+  // Coverage accounting. The question "how much of the arena is still unmapped" can only be
+  // answered here: the occupancy buffer is the only place that knows which cells are UNKNOWN,
+  // and it is never published in full (publishUnknown() is commented out upstream, and
+  // occupancy_all carries only OCCUPIED cells). Anything downstream trying to infer coverage
+  // from the published clouds is guessing.
+  node_.param("map_ros/coverage_interval", coverage_interval_, 2.0);
+  node_.param("map_ros/publish_unknown", publish_unknown_, false);
+  node_.param("map_ros/arena_area_m2", arena_area_m2_, -1.0);
+  coverage_last_known_ = -1;
+  coverage_pub_ = node_.advertise<std_msgs::Float64MultiArray>("/sdf_map/coverage", 10);
+  coverage_timer_ =
+      node_.createTimer(ros::Duration(coverage_interval_), &MapROS::coverageCallback, this);
+
   map_all_pub_ = node_.advertise<sensor_msgs::PointCloud2>("/sdf_map/occupancy_all", 10);
   map_local_pub_ = node_.advertise<sensor_msgs::PointCloud2>("/sdf_map/occupancy_local", 10);
   map_local_inflate_pub_ =
@@ -82,6 +97,131 @@ void MapROS::init() {
   sync_cloud_pose_->registerCallback(boost::bind(&MapROS::cloudPoseCallback, this, _1, _2));
 
   map_start_time_ = ros::Time::now();
+}
+
+// Sweep the map box once and report how much of the arena has actually been seen.
+//
+// Counted over the FULL 3D box, then converted to an AREA by dividing out the number of z
+// layers: the map is a thin fixed-altitude slab (box_z_halfspan either side of cruise), so
+// every column carries the same handful of layers and the ratio is exact rather than a
+// projection. Reporting area is what makes the number comparable to the arena's own measured
+// free area, which is how "how much is left" gets a meaningful denominator.
+//
+// FREE vs OCCUPIED vs UNKNOWN come straight from SDFMap::getOccupancy, so this reports what the
+// planner believes, not what the sensor happened to return -- which is the whole point when
+// diagnosing why exploration keeps revisiting somewhere it has already flown.
+void MapROS::coverageCallback(const ros::TimerEvent& e) {
+  // MapROS is a friend of SDFMap, so read box_min_/box_max_ directly: they are already voxel
+  // INDICES, and the same half-open bounds publishMapAll() iterates. Going through getRegion()
+  // would have given the whole map's origin and size in metres, which is a different and
+  // larger volume than the planning box.
+  const Eigen::Vector3i& imin = map_->mp_->box_min_;
+  const Eigen::Vector3i& imax = map_->mp_->box_max_;
+
+  int free_n = 0, occ_n = 0, unk_n = 0;
+  // The unknown cloud is assembled from this same sweep rather than from a second pass: the
+  // loop already visits every voxel in the box and already asks getOccupancy for each, so the
+  // only added cost is the push_back for cells that are unknown. roscpp skips serialisation
+  // entirely when nothing is subscribed, so leaving this on costs nothing when unused.
+  pcl::PointCloud<pcl::PointXYZ> unknown_cloud;
+  pcl::PointXYZ upt;
+  for (int x = imin(0); x < imax(0); ++x)
+    for (int y = imin(1); y < imax(1); ++y)
+      for (int z = imin(2); z < imax(2); ++z) {
+        const Eigen::Vector3i idx(x, y, z);
+        const int s = map_->getOccupancy(idx);
+        if (s == SDFMap::UNKNOWN) {
+          ++unk_n;
+          if (publish_unknown_) {
+            Eigen::Vector3d pos;
+            map_->indexToPos(idx, pos);
+            upt.x = pos(0);
+            upt.y = pos(1);
+            upt.z = pos(2);
+            unknown_cloud.push_back(upt);
+          }
+        } else if (s == SDFMap::OCCUPIED)
+          ++occ_n;
+        else
+          ++free_n;
+      }
+
+  if (publish_unknown_) {
+    unknown_cloud.width = unknown_cloud.points.size();
+    unknown_cloud.height = 1;
+    unknown_cloud.is_dense = true;
+    unknown_cloud.header.frame_id = frame_id_;
+    sensor_msgs::PointCloud2 unknown_msg;
+    pcl::toROSMsg(unknown_cloud, unknown_msg);
+    unknown_pub_.publish(unknown_msg);
+  }
+
+  const int layers = std::max(1, imax(2) - imin(2));
+  const double res = map_->getResolution();
+  const double cell_area = res * res;
+  const double known_area = double(free_n + occ_n) / layers * cell_area;
+  const double free_area = double(free_n) / layers * cell_area;
+  const double unknown_area = double(unk_n) / layers * cell_area;
+  // WHAT IS LEFT TO MAP IS THE UNKNOWN AREA. Nothing else. This used to be computed as
+  // (configured arena area - free area), which is a different quantity entirely and was wrong
+  // in a way that ended runs early:
+  //
+  //   2026-09-06 run 16_05_50 at t=638 reported "162.3 m2 free of 158.0 m2 arena = 102.7%;
+  //   0.0 m2 left" while the SAME message carried 8294 unknown cells = 16.6 m2 genuinely
+  //   never observed. The map was declared complete with 16.6 m2 unseen, which is also why
+  //   the frontier list never emptied: there really was unmapped space left.
+  //
+  // The cause was a region mismatch. arena_area_m2 (158.0) is the free floor of the WHOLE
+  // 15 x 15 arena, but this loop only ever sweeps the planning box, which is a subset
+  // (world x[-6.8,6.8] y[-7.3,6.8], 191.8 m2 of box). Measured from the arena mesh over that
+  // box, the free floor is 157.5-174.5 m2 depending on how a partly-occupied 0.1 m cell is
+  // classified -- which is exactly why no hand-entered constant belongs in this calculation.
+  // Dividing a box quantity by a whole-arena constant let the ratio pass 100% and, worse,
+  // clamped "left" to zero.
+  //
+  // Both numbers below are now derived from the sweep itself, so they cannot drift from the
+  // box the way a hand-entered constant did:
+  //   left = unknown_area                       - the honest "still to see"
+  //   pct  = free / (free + unknown)            - fraction of OBSERVABLE space seen, where
+  //                                               observable excludes cells known to be wall
+  // pct can legitimately sit below 100% forever if some unknown space is sealed behind walls
+  // or outside the reachable region; that is a true statement about the map, not an error.
+  const double observable = free_area + unknown_area;
+  const double pct = observable > 1e-6 ? 100.0 * free_area / observable : 0.0;
+  const double left = unknown_area;
+  // Kept only as a cross-check in the published message and to warn on a stale config value.
+  const double occ_area = double(occ_n) / layers * cell_area;
+  const double denom = arena_area_m2_ > 0.0 ? arena_area_m2_ : observable;
+  // Only compare once the map has largely converged. Early in a run almost everything is
+  // UNKNOWN, so `observable` starts at the whole box area (191.8) and only falls towards the
+  // true free floor as walls are discovered. Comparing before then fires on every fresh run
+  // and says nothing. Wait until unknown is under a fifth of the observable space.
+  if (arena_area_m2_ > 0.0 && unknown_area < 0.2 * observable &&
+      std::abs(arena_area_m2_ - observable) > 20.0)
+    ROS_WARN_THROTTLE(60.0,
+                      "[coverage] map_ros/arena_area_m2 = %.1f m2 does not describe this planning "
+                      "box (observable free+unknown = %.1f, wall = %.1f, box total = %.1f). It is "
+                      "reported for reference ONLY and is not used for 'left' or the percentage.",
+                      arena_area_m2_, observable, occ_area, observable + occ_area);
+
+  std_msgs::Float64MultiArray msg;
+  msg.data = { double(free_n), double(occ_n),   double(unk_n), free_area,
+               known_area,     unknown_area,    denom,         pct,
+               left,           double(layers),  (ros::Time::now() - map_start_time_).toSec() };
+  coverage_pub_.publish(msg);
+
+  // Only log when the picture actually changed, so a stalled map is visible as silence in the
+  // log rather than as an unchanging line scrolling past every two seconds.
+  const int known_now = free_n + occ_n;
+  if (known_now != coverage_last_known_) {
+    // "left" is the UNKNOWN area, which is the only thing that means "still to map". Do not
+    // reintroduce a form of this line that derives it from a configured arena size; see above.
+    ROS_INFO("[coverage] mapped %.1f m2 free of %.1f m2 observable = %.1f%%; "
+             "%.1f m2 STILL UNKNOWN (%d cells); wall %.1f m2; t+%.0fs",
+             free_area, observable, pct, left, unk_n, occ_area,
+             (ros::Time::now() - map_start_time_).toSec());
+    coverage_last_known_ = known_now;
+  }
 }
 
 void MapROS::visCallback(const ros::TimerEvent& e) {

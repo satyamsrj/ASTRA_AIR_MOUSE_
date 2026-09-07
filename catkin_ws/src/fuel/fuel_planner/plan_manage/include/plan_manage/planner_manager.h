@@ -53,6 +53,9 @@ public:
   EDTEnvironment::Ptr edt_environment_;
   unique_ptr<Astar> path_finder_;
   unique_ptr<TopologyPRM> topo_prm_;
+  // End exploration yaw trajectories along the path instead of at the frontier centroid.
+  // Only valid for an omnidirectional sensor; see planYawExplore().
+  bool yaw_follows_path_{ true };
 
 private:
   /* main planning algorithms & modules */

@@ -1,0 +1,66 @@
+<?xml version="1.0" ?>
+<sdf version="1.5">
+  <model name="launch_pad">
+    <static>true</static>
+    <link name="link">
+      <!-- Source mesh (simulation/LAUNCHED PAD.STL) is a 12-triangle box authored in MILLIMETRES
+           as 609.60 x 150.00 x 609.60 with its minimum corner at the origin, and with the 150
+           (thickness) on the Y AXIS rather than Z. Two corrections are therefore baked in here:
+
+           1. <scale> converts mm to m AND resizes. The raw pad is 0.6096 m square, which is
+              SMALLER than the Iris (0.767 m across: rotors at +/-0.13, +/-0.22 = 0.2555 m from
+              centre plus 0.128 m rotor radius). The props would overhang and landing tolerance
+              would be nil. Scaled to a 1.5 m square instead:
+                  across   1.5 / 609.6 = 0.00246
+                  thickness 0.03 / 150  = 0.0002
+
+           2. <pose> roll of +pi/2 maps the mesh's +Y (its up axis) onto world +Z. Under that
+              rotation a mesh point (x,y,z) becomes (x, -z, y), so the scaled mesh occupies
+              world x in [0,1.5], y in [-1.5,0], z in [0,0.03]; its centre is at
+              (0.75, -0.75, 0.015). The translation below cancels that, so THIS MODEL'S ORIGIN
+              IS THE PAD CENTRE and the world file positions it with a plain <pose>. The
+              generator writes that placement from launch_pad.center in mission_config.yaml
+              (default world (0.00, -9.50), 2.0 m due south of the arena's 1.90 m door).
+
+           Thickness is deliberately 0.03 m, not the source's 0.15 m. FAST-LIO pins published Z
+           from the TFmini rangefinder, so flying from floor to pad shortens the measured range by
+           the pad thickness and the controller climbs to compensate. At 0.15 m that is a 0.15 m
+           spurious altitude step during terminal descent; at 0.03 m it is inside sensor noise.
+           See PLANNING_DOCS/outdoor_launchpad_to_arena_mission_plan_2026-09-04.md Sec 1.7/1.9. -->
+      <pose>-0.75 0.75 0 1.5707963 0 0</pose>
+      <collision name="collision">
+        <geometry>
+          <mesh>
+            <uri>model://launch_pad/meshes/launch_pad.stl</uri>
+            <scale>0.00246 0.0002 0.00246</scale>
+          </mesh>
+        </geometry>
+        <surface>
+          <!-- Explicit ODE default, same reasoning as the arena: a high mu here would pin the
+               vehicle on touchdown instead of letting it settle. -->
+          <friction>
+            <ode>
+              <mu>1.0</mu>
+              <mu2>1.0</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+      <visual name="visual">
+        <cast_shadows>false</cast_shadows>
+        <geometry>
+          <mesh>
+            <uri>model://launch_pad/meshes/launch_pad.stl</uri>
+            <scale>0.00246 0.0002 0.00246</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Yellow</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

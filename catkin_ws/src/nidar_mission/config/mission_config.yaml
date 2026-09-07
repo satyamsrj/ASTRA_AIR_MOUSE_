@@ -1,0 +1,568 @@
+# =============================================================================
+# NIDAR AirMouse - central mission configuration
+# =============================================================================
+# This file is the SINGLE SOURCE OF TRUTH for mission tunables.
+#
+# HOW IT REACHES EACH CONSUMER
+# ----------------------------
+# Four subsystems read four different formats, so one file alone cannot drive
+# all of them directly:
+#
+#   consumer                     reads                        mechanism
+#   ---------------------------  ---------------------------  ----------------------
+#   mission nodes (EDM, guard,   ROS parameter server         rosparam load (direct)
+#   mission_manager, detector)
+#   FUEL exploration             roslaunch <param> in          generator rewrites
+#                                algorithm.xml                 the <param> values
+#   FAST-LIO                     its own config/velodyne.yaml  generator rewrites it
+#   Gazebo                       static world/SDF XML          generator rewrites it
+#
+# So: edit THIS file, then run
+#       rosrun nidar_mission apply_mission_config.py
+# which renders the three derived files and prints exactly what it changed.
+# Values consumed straight off the ROS param server need no regeneration.
+#
+# ADDING A NEW ARENA
+# ------------------
+#   1. drop the .stl into simulation/custom_models/<name>/meshes/
+#   2. copy the arina_nidar model.sdf/model.config and set the scale/pose
+#   3. add an entry under arenas: below and point `arena.active` at it
+#   4. re-run the generator
+# =============================================================================
+
+nidar:
+
+  # ---------------------------------------------------------------------------
+  # ARENA
+  # ---------------------------------------------------------------------------
+  arena:
+    active: arina_nidar          # which entry under `arenas` is in play
+
+  arenas:
+    arina_nidar:
+      model_name: arina_nidar    # Gazebo model:// name
+      mesh_units: mm             # source mesh authored in millimetres
+      mesh_scale: 0.001          # -> metres
+      # The model SDF already re-centres the mesh on its own origin, so this is simply
+      # where the arena CENTRE sits in the world. Leave at 0,0,0 unless deliberately
+      # offsetting the whole arena.
+      model_pose: {x: 0.0, y: 0.0, z: 0.0, roll: 0.0, pitch: 0.0, yaw: 0.0}
+      # resulting axis-aligned footprint in world coordinates
+      bounds: {x_min: -7.5, x_max: 7.5, y_min: -7.5, y_max: 7.5}
+      wall_height: 2.54
+      # measured from the mesh at the 1.4 m cruise slice
+      measured:
+        free_area_m2: 158.0
+        median_clearance_m: 0.48
+        max_clearance_m: 1.36
+        wall_segments: 606
+      # the single entrance, measured from the mesh
+      entry:
+        wall: south              # the wall the opening is in
+        line: -7.5               # y coordinate of that wall
+        center: {x: 0.0, y: -7.5}
+        width: 1.90
+        approach_heading_deg: 90.0   # world heading to fly to pass through (+Y = north)
+
+    # Previous arena, kept so it can be switched back to for regression runs.
+    nidar_arena:
+      model_name: nidar_arena
+      mesh_units: m
+      mesh_scale: 1.0
+      model_pose: {x: 0.0, y: 0.0, z: 0.0, roll: 0.0, pitch: 0.0, yaw: 0.0}
+      bounds: {x_min: -7.5, x_max: 7.5, y_min: -7.5, y_max: 7.5}
+      wall_height: 2.44
+      measured:
+        free_area_m2: 143.0
+        median_clearance_m: 0.42
+        max_clearance_m: 1.26
+        wall_segments: 584
+      entry:
+        wall: south
+        line: -7.5
+        center: {x: 0.0, y: -7.5}
+        width: 15.0              # this arena's whole south face is open
+        approach_heading_deg: 90.0
+
+  # ---------------------------------------------------------------------------
+  # LAUNCH PAD  (spawn + return target)
+  # ---------------------------------------------------------------------------
+  launch_pad:
+    enabled: true
+    model_name: launch_pad
+    center: {x: 0.0, y: -9.5}    # 2.0 m due south of the arena door
+    size: 1.5                    # square edge, metres
+    thickness: 0.03              # keep small: FAST-LIO pins Z off the TFmini
+    spawn_yaw: 1.5707963         # +Y (north), facing the door
+
+  # ---------------------------------------------------------------------------
+  # VEHICLE
+  # ---------------------------------------------------------------------------
+  vehicle:
+    model: x500_vlp16            # PX4 airframe/model spawned by test_takeoff.sh
+    # Physical collision radius, X500 AS SHRUNK ON 2026-09-06: rotor hubs at
+    # (+/-0.120, +/-0.120) = 0.1697 m from centre, each rotor collision is a 0.100 m-radius
+    # cylinder disc -> 0.2697 m, span 0.539 m.
+    #
+    # WHY IT SHRANK. At the previous 0.386 (span 0.771 m) the vehicle did not fit arina_nidar:
+    # the arena's median corridor at cruise height is 0.80 m, so the disc filled it edge to
+    # edge. Measured over one 460 s flight: median wall clearance 0.342 m -- BELOW the prop
+    # radius -- and 50.8% of the flight with the propeller disc inside a wall. The vehicle
+    # jammed in a 2 m strip for 226 s while coverage sat frozen at 38.3% for 406 s.
+    # The margin against planner.obstacles_inflation (0.40) was 14 mm, against a measured
+    # localisation error of 101-160 mm median. 0.2697 makes that margin 130 mm.
+    # See PLANNING_DOCS/airframe_arena_fit_root_cause_and_plan_2026-09-06.md.
+    #
+    # NOTHING may plan with a smaller inflation than this. See planner.obstacles_inflation.
+    collision_radius: 0.2697
+    cruise_altitude_world: 1.5   # metres AGL
+    # Height of base_link above the surface it is parked on, i.e. how far the spawn must be
+    # lifted so nothing bolted underneath starts the run inside the pad.
+    # Must exceed the LOWEST hanging component measured in the vehicle SDF:
+    #     X500 centre plate         bottom at -0.018
+    #     TFmini (belly-mounted)    bottom at -0.0698
+    #     A8 mini camera            bottom at -0.0935
+    #     skid rails                bottom at -0.2195   <- governs
+    # Was a bare 0.07 hardcoded in two places, sized for the airframe alone; once the camera and
+    # rangefinder were mounted under the belly that spawned both inside the launch pad.
+    # 0.23 is MEASURED, not nominal: dropped from 0.30 the X500 settles with base_link 0.2272 m
+    # above the pad surface, i.e. the rails compress ~8 mm into contact. Spawning at exactly the
+    # nominal 0.2195 would start the vehicle already interpenetrating the pad.
+    belly_clearance: 0.23
+
+  # ---------------------------------------------------------------------------
+  # LIDAR  (VLP-16)
+  # ---------------------------------------------------------------------------
+  # NOTE: blind/scan_line/extrinsic are rendered into
+  # catkin_ws/src/FAST_LIO/config/velodyne.yaml by the generator.
+  lidar:
+    topic: /velodyne_points
+    # Height of velodyne_link above base_link. THIS ONE NUMBER drives, via the generator:
+    #   * the velodyne_link <pose> in x500_vlp16.sdf
+    #   * the length and position of the standoff mast that holds it up
+    #   * FAST-LIO's mapping/extrinsic_T, which must equal the mount pose exactly
+    # so raising or lowering the lidar is a single edit here followed by
+    #     rosrun nidar_mission apply_mission_config.py
+    # rather than three hand edits that drift apart (they did: the SDF said 0.20, the
+    # generator wrote 0.28 into a file nothing loads, and the live config still said 0.12).
+    #
+    # THE FLOOR IS SET BY THE PROPELLERS, and the generator refuses anything below it.
+    # The lowest ring leaves at -15 deg, so at radius r it has dropped r*tan(15) = 0.26795*r.
+    # Measured off the real x500 geometry:
+    #     prop COLLISION boxes  0.27923 long, hubs at r = 0.24607  -> tips at r = 0.3857,
+    #                           top of the box z = 0.0604   -> needs mount > 0.1637
+    #     prop VISUAL meshes    span r = 0.1780 .. 0.3637, z = 0.0440 .. 0.0694
+    #                                                      -> needs mount > 0.1668  <- governs
+    # At 0.20 the lowest ring passes 36 mm over the collision tip and 33 mm over the visual
+    # tip, so no scan line is chopped anywhere in the blade annulus.
+    # A hand-set 0.0889 (placement rig, 2026-09-06) crossed the prop plane at r = 0.108, the
+    # inner edge of the sweep, and cut the lower rings across nearly the whole annulus.
+    mount_height: 0.20
+    # Half of the vertical FOV, radians. The Gazebo sensor scans -0.261799..+0.261799
+    # (+/-15 deg). FUEL's perception_utils/top_angle MUST match this or the planner
+    # credits viewpoints with seeing cells the sensor cannot return.
+    vertical_half_fov_rad: 0.261799
+    beams: 16
+    horizontal_samples: 1800
+    # Sensor range window, written into both the <ray> block and the plugin in x500_vlp16.sdf.
+    # min_range is the Gazebo sensor's own floor: nothing closer is EVER returned, whatever
+    # `blind` says, so the two have to move together for a small blind radius to mean anything.
+    min_range: 0.05
+    # 130 m was the real VLP-16's spec sheet, not this arena. The arena is 15 x 15 m with 2.5 m
+    # walls, so the longest possible return is its 21 m diagonal; every ray cast beyond that is
+    # pure CPU. 30 m keeps comfortable headroom over the diagonal.
+    max_range: 30.0
+    # Returns closer than this are discarded before FAST-LIO sees them AND before they enter
+    # the ikd-tree map. Must be >= min_range to be meaningful.
+    # History: at 2.0 the vehicle went blind against walls - in a 15 m arena with interior
+    # rooms it is routinely within 2 m of several walls at once, so whole scans were thrown
+    # away, FAST-LIO logged "No Effective Points!", dead-reckoned on IMU and ran away 8 m.
+    # It was then 0.35 to reject propeller self-returns. It no longer has to: with the mount at
+    # 0.20 the lowest ring clears the outermost blade by 33 mm, and nothing else on the
+    # airframe is in the beam either (the plate rim at r = 0.177 sits 0.12 m below the lowest
+    # ray there). The only object inside 0.35 m is the standoff mast at r = 0.008, which is
+    # inside min_range and never returns. So this can now sit at the sensor floor.
+    blind: 0.05
+    # FAST-LIO IMU->LiDAR extrinsic is DERIVED from mount_height by the generator, as
+    # [0, 0, mount_height]; there is deliberately no second copy of it here to drift.
+    # Measured from base_link, not from the SDF's /imu_link at z = 0.02, because imu_topic is
+    # /mavros/imu/data and PX4 has no IMU lever arm configured (EKF2_IMU_POS_* unset) - so
+    # EKF2, and relay_odometry.py feeding FAST-LIO's output back as vision_pose, all treat the
+    # IMU as being AT base_link. extrinsic_R is identity: velodyne_link carries rpy 0 0 0 and
+    # mavros publishes IMU in the same FLU body frame.
+    # Persisting every scan for the whole flight exhausted RAM and got runs OOM-killed
+    # before the file was ever written. Keep false for anything longer than a minute.
+    pcd_save_en: false
+
+  # ---------------------------------------------------------------------------
+  # RANGEFINDER  (TFmini Plus, belly-mounted, downward)
+  # ---------------------------------------------------------------------------
+  # This sensor defines the ALTITUDE DATUM for the entire stack. EKF2_HGT_REF=2 makes it PX4's
+  # only height source, and FAST-LIO pins its published Z to it, so everything that flies to an
+  # altitude - the guard, FUEL's map box, FUEL's viewpoints, the EDM's cruise setpoint - is
+  # ultimately measured from here.
+  rangefinder:
+    topic: /tfmini/range
+    # Distance from base_link DOWN to the beam origin, metres. MUST equal three other things:
+    #   * the tfmini_lidar <include> pose z in x500_vlp16.sdf   (-0.0573)
+    #   * PX4's EKF2_RNG_POS_Z in the airframe file             (+0.0573)
+    #   * FAST-LIO's mapping/tfmini_mount_offset                (generated from here)
+    # The generator writes the FAST-LIO one and checks the PX4 one.
+    mount_offset: 0.0573
+    # The sensor's own usable band. Deliberately NOT taken from the Range message: Gazebo fills
+    # msg->max_range from the <ray> element, and the ray sensor reports exactly that value when
+    # the beam hits nothing, so a bounds test against it accepts the no-return sentinel. On
+    # 2026-09-04 that pinned the published altitude to 34.95 m after touchdown.
+    range_min: 0.10
+    range_max: 12.0
+
+  # ---------------------------------------------------------------------------
+  # CAMERA  (SIYI A8 mini)
+  # ---------------------------------------------------------------------------
+  camera:
+    enabled: true
+    topic: /camera/image_raw
+    width: 640                   # sim only; the real A8 mini does 1080p/4K
+    height: 480
+    fps: 15                      # sim only; real is 30
+    horizontal_fov_rad: 1.4137   # 81 deg horizontal (93 deg diagonal on the real unit)
+    mount:                       # relative to iris::base_link
+      x: 0.05
+      y: 0.0
+      z: -0.02
+      pitch_deg: -15.0           # fixed downward tilt; gimbal articulation is later
+    mesh:
+      path: model://iris_vlp16_cam/meshes/siyi_a8_mini.stl
+      scale: 1.0                 # the STL is already in metres (52 x 61 x 84 mm)
+    gstreamer:
+      enabled: false             # UDP 5600 feed to GCS; off until GCS work starts
+      udp_port: 5600
+
+  # ---------------------------------------------------------------------------
+  # RETURN TO LAUNCH
+  # ---------------------------------------------------------------------------
+  # Runs after FUEL publishes /exploration_completed. The EDM retraces the breadcrumb trail it
+  # recorded during exploration, then flies the entry corridor in reverse to the pad and hands
+  # the descent to PX4 AUTO.LAND. Nothing here plans a new route: every waypoint except the
+  # last three is a point the vehicle physically occupied, so the path home is collision-free
+  # without consulting the map at all.
+  return:
+    # Hard cap on the return leg. On expiry the vehicle lands where it is, which is safer than
+    # letting it keep flying a trail that is evidently not working.
+    # 240 s covers the ~21 m arena diagonal at max_vel 0.6 with a wide margin for the
+    # waypoint-by-waypoint stepping.
+    max_duration: 240.0
+
+  # ---------------------------------------------------------------------------
+  # FLIGHT LIMITS
+  # ---------------------------------------------------------------------------
+  flight:
+    max_vel: 0.6
+    max_acc: 0.3
+    # Yaw rate. These two MUST agree: max_yaw_rate is rad/s (consumed by
+    # flight_envelope_guard.py), yaw_rate_deg_s is the same number in degrees. They did not
+    # agree before -- 1.5 rad/s is 86 deg/s, not 60 -- so the guard slewed 43% faster than the
+    # stack thought, and PX4's own MC_YAWRATE_MAX (200 deg/s default) bounded nothing useful.
+    #
+    # The limit exists because of FAST-LIO, not the airframe. Within one 100 ms VLP-16 scan the
+    # vehicle sweeps (rate x 0.1) of yaw; at the 158 deg/s measured on 2026-09-05 that is ~16
+    # deg of rotation inside a single scan, which left too few valid correspondences after the
+    # blind-radius cut. FAST-LIO logged "No Effective Points!", stopped correcting, dead-reckoned
+    # on IMU and ran away to 952 m; the vehicle fell out of the sky at t+127.
+    # 60 deg/s keeps intra-scan rotation to ~6 deg, which de-skewing handles.
+    max_yaw_rate: 1.047        # rad/s == 60 deg/s
+    yaw_rate_deg_s: 60.0
+    yaw_acc_deg_s2: 90.0
+
+  # ---------------------------------------------------------------------------
+  # PLANNER  (FUEL)
+  # ---------------------------------------------------------------------------
+  planner:
+    map_resolution: 0.1
+    # FUEL treats the vehicle as a POINT; this inflation is its ONLY notion of size.
+    # MUST be >= vehicle.collision_radius (0.384) or it routes the airframe through
+    # gaps it cannot fit, and the props wedge on walls.
+    # Measured connected navigable area in arina_nidar: 0.384->104.6 m2, 0.42->85.5 m2,
+    # 0.45->81.5 m2, 0.50->17.3 m2 (collapses). Do not exceed 0.45.
+    # Must be >= the vehicle's true collision radius (0.384 m), because FUEL models the
+    # vehicle as a POINT and this is its only notion of size. 0.42 = 0.384 + margin.
+    #
+    # This was briefly lowered to 0.30 on 2026-09-05 on the strength of a flood-fill that
+    # reported the arena "entry blocked" at >=0.384. That measurement was wrong: it was seeded
+    # at world (0, -6.6), which is itself a too-tight cell (0.35 m clearance). Re-seeded from a
+    # genuinely free point just inside the door (0, -7.05), the arena is 100% connected at
+    # EVERY inflation tested:
+    #     0.30 -> 126.3 m2   0.35 -> 113.6   0.384 -> 101.2   0.42 -> 89.5   0.45 -> 78.4
+    # The 5618 "plan fail" that prompted the change were not caused by inflation at all: the
+    # entry module had parked the vehicle inside a cell that 0.42 correctly marks occupied, and
+    # A* cannot plan from an occupied start. The real fix was to stop the approach somewhere the
+    # vehicle actually fits - see entry/entry_confirm_depth.
+    #
+    # 2026-09-05, measured again with the live map at the moment of the deadlock: the analysis
+    # above is about CONNECTIVITY of the free space, and it stands. What it missed is that FUEL
+    # never inflates by the number written here. SDFMap does
+    #     inf_step = ceil(obstacles_inflation / resolution)      (sdf_map.cpp:434)
+    # so with resolution 0.10, 0.42 becomes 5 cells = 0.50 m of ACTUAL inflation (+19%).
+    # Flood-filling the recorded map from the vehicle's own cell:
+    #     0.42 -> 310 cells reachable (0.4%), max range 1.71 m   <- sealed into a 2.2x0.8 m pocket
+    #     0.40 -> 76475 cells reachable (100%), max range 16.35 m
+    # A cliff, not a gradient: the escape channel is one 10 cm cell wide and the extra ring of
+    # inflation shuts it. 0.40 is the LARGEST value that still quantises to 4 cells, and it stays
+    # above the Iris collision radius of 0.384 m (hubs 0.2556 m + prop 0.128 m).
+    # apply_mission_config.py now refuses any value that is not a multiple of map_resolution.
+    # See PLANNING_DOCS/exploration_deadlock_and_x500_migration_2026-09-05.md.
+    obstacles_inflation: 0.40
+    # Soft ESDF repulsion radius. Must stay below the arena's typical clearance
+    # (median 0.48 m here) or every trajectory point sits in the penalty band.
+    dist0: 0.5
+    # ---- VERTICAL GEOMETRY, all of it derived; do not write camera_init numbers here ----
+    # EVERY altitude FUEL uses is in the camera_init frame, whose origin is wherever base_link
+    # was when FAST-LIO initialised, i.e. the spawn height. So
+    #     camera_init z = world z - (launch_pad.thickness + vehicle.belly_clearance)
+    # and the generator now computes traj_server/z_cruise, optimization/z_cruise,
+    # sdf_map/box_min_z, sdf_map/box_max_z and frontier/min|max_candidate_z from
+    # vehicle.cruise_altitude_world with that offset, the same way box_min_x/box_max_y are
+    # already derived from the arena bounds.
+    #
+    # WHY THIS IS NOT COSMETIC. Those five values were hand-set as literals for the IRIS, whose
+    # spawn height was 0.10 (pad 0.03 + belly 0.07) - traj_server.cpp still carries the comment
+    # "world = z_cruise_ + 0.1" from that era. The X500 spawns at 0.26, so after the airframe
+    # migration every one of them meant 0.16 m higher in world terms than it read:
+    #     z_cruise 1.4  -> world 1.66, while flight_envelope_guard clamps at 1.55, so the
+    #                      traj_server Z pin and the guard fought on every single command and
+    #                      the vehicle sat permanently saturated at the top of the band
+    #     candidate_z 1.35..1.45 -> world 1.61..1.71, viewpoint altitudes the guard would never
+    #                      let the vehicle reach, so every viewpoint was approached from ~0.15 m
+    #                      below the height its visible-cell count was computed at
+    # Change cruise_altitude_world (or the spawn height) and re-run the generator; nothing here
+    # needs a camera_init number typed by hand ever again.
+    #
+    # Half-thickness of the map/frontier slab. Kept thin because a +/-15 deg sensor needs
+    # 0.25/tan(15) = 0.93 m of standoff to see a 0.25 m vertical offset, which is what
+    # candidate_rmin guarantees.
+    #
+    # THE SLAB IS CENTRED ON THE MIDPOINT BETWEEN THE VEHICLE AND ITS LIDAR, not on the
+    # vehicle. Two different things have to live inside this box and they are lidar.mount_height
+    # apart:
+    #   * base_link, because A* plans from the vehicle's own cell and cannot expand from a
+    #     start outside the box (that is the 99.2%-plan-failure bug of 2026-09-06)
+    #   * the LIDAR, because it is what actually fills the map. If the sensor sits above the
+    #     ceiling, every upward ring misses the slab entirely and the near-horizontal rings --
+    #     the ones that map at long range -- only clip a distant annulus.
+    # Centring on the vehicle put the lidar exactly ON the ceiling (cruise + 0.20 = box_max_z).
+    # Measured live from /cloud_registered at that setting: only 28.0% of returns landed inside
+    # the slab, so 72% of every scan was discarded before the map saw it. Coverage stalled at
+    # ~60% with 13 frontiers that would not die and 189 repeat viewpoint commitments, because
+    # the vehicle had to get within ~2 m of anything to clear it.
+    #
+    # Measured capture fraction against the same live scan:
+    #     centre 1.240 (vehicle),  halfspan 0.20 -> 28.0%   lidar margin +0.000  NO reach
+    #     centre 1.340 (midpoint), halfspan 0.20 -> 35.3%   margins +0.10 both
+    #     centre 1.340 (midpoint), halfspan 0.25 -> 42.2%   margins +0.15 both   <- chosen
+    #     centre 1.340 (midpoint), halfspan 0.30 -> 49.6%   margins +0.20 both
+    #     centre 1.440 (lidar),    halfspan 0.20 -> 41.2%   VEHICLE margin +0.000 (reopens the bug)
+    # 0.25 buys 1.5x the sensor data for one extra z layer (0.4 -> 0.5 m, +25% map cells) and
+    # leaves 0.15 m of margin at BOTH ends, so neither the vehicle nor the lidar can fall out of
+    # the box under normal altitude jitter. 0.30 captures more but costs another layer, and CPU
+    # is already the binding constraint here.
+    box_z_halfspan: 0.25
+    # Half-band the frontier viewpoint sampler may place a viewpoint in, about cruise. Narrow
+    # on purpose: viewpoints otherwise inherit their frontier cluster's mean Z and drag the
+    # cruise altitude around to chase whatever height a frontier happens to sit at.
+    viewpoint_z_halfband: 0.05
+    # Target hysteresis: seconds of ViewNode::computeCost a challenger must beat the
+    # committed target by. 0.0 restores upstream's stateless (oscillating) behaviour.
+    #
+    # RAISED 1.0 -> 3.0 on 2026-09-06 after measuring the cost of the churn it was failing to
+    # prevent. Live 70 s probe of run 16_05_50 while the vehicle looked like it was "hovering
+    # and moving on a single path":
+    #     path 25.83 m, net displacement 6.44 m       -> churn ratio 4.0
+    #     effective progress 0.091 m/s vs 0.60 cruise -> 15% efficient
+    #     66% of the time rotating faster than 15 deg/s, yaw rate p90 pinned at the 60 limit
+    #     target changed 0.37 times/s, median jump 2.47 m, max 12.08 m, spread over the
+    #     WHOLE arena (x 2.6..12.4, y -6.3..6.8)
+    # It was not hovering. It was turning, and never finishing a turn before the goal moved.
+    #
+    # The margin has to exceed the turn the switch itself provokes, or switching is a net loss
+    # the cost function cannot see: computeCost charges the yaw difference to the CANDIDATE,
+    # but the seconds actually burned turning are paid afterwards and never attributed to the
+    # decision that caused them. At max_yawdot 60 deg/s a switch can demand a 180 deg turn =
+    # 3.0 s. So 3.0 s is the break-even margin, not a tuning preference:
+    #     60 deg -> 1.0 s     90 deg -> 1.5 s     120 deg -> 2.0 s     180 deg -> 3.0 s
+    # At the old 1.0 the planner would switch for a 1.1 s gain and then spend up to 3.0 s
+    # turning. Lower this only if max_yawdot rises with it.
+    target_switch_margin: 3.0
+    target_reached_dist: 0.4
+    # RAISED 2.0 -> 3.5 at the same time. This is the radius within which some active viewpoint
+    # must still sit for the committed target to count as "still there"; if nothing is within
+    # it the hold is dropped entirely and the challenger wins unconditionally.
+    # ed_->points_ holds the TOP viewpoint per frontier, and getTopViewpointsInfo() picks that
+    # representative RELATIVE TO THE CURRENT POSITION, so the representative for an unchanged
+    # frontier slides as the vehicle moves. At 2.0 the hold was being dropped because the
+    # representative had moved, not because the frontier was cleared -- and the measured median
+    # target jump was 2.47 m, just past the old threshold.
+    target_match_dist: 3.5
+
+  # ---------------------------------------------------------------------------
+  # ENTRY DETECTION  (EDM)
+  # ---------------------------------------------------------------------------
+    # FINISH-state recovery for FUEL's exploration FSM. Upstream treats FINISH as terminal,
+    # so a single NO_FRONTIER ends the mission forever; the mission triggers exploration the
+    # moment the vehicle crosses the threshold, when the arena is still unmapped, so the first
+    # plan reliably returns NO_FRONTIER. interval x max bounds how long planning is retried
+    # (2.0 x 15 = 30 s) before exploration is accepted as genuinely complete.
+    finish_recheck_interval: 2.0
+    finish_recheck_max: 15
+
+  entry:
+    enabled: true
+    # Sized for this arena's measured 1.90 m door. Do NOT set door_max_width to 8.0
+    # as an older plan suggested - that figure was for the previous arena whose entire
+    # south face was open, and here it would match ordinary interior wall gaps.
+    door_min_width: 0.80
+    door_max_width: 3.00
+    target_door_width: 1.90
+    search_forward_speed: 0.40
+    # 30.0 was too short and, worse, the old EDM started this clock at node init rather than
+    # at the start of the approach, so on 2026-09-05 it "timed out" while the vehicle was
+    # still climbing. The clock now starts when ENTRY_SEARCH begins; 90 s covers the 2 m
+    # transit plus a full lateral realignment at max_lateral_speed.
+    max_search_duration: 90.0
+    confidence_threshold: 0.70
+    stability_required_cycles: 10
+    min_clearance: 0.40          # keep equal to planner.obstacles_inflation
+    target_clearance: 0.60
+    # Distance past the door line at which entry is declared complete, and how far beyond that
+    # the forward setpoint may reach.
+    #
+    # 1.0 m aimed the vehicle at world y = -6.5 -- which is a WALL. There is structure spanning
+    # the corridor about 0.9 m inside the door; measured clearance along the centreline:
+    #     y=-7.05: 0.81   -6.95: 0.72   -6.85: 0.63   -6.75: 0.54   -6.65: 0.46
+    #     y=-6.55: 0.39   -6.45: 0.34   -6.35: 0.30      (vehicle radius is 0.384)
+    # Both hard crashes wedged on that line: run 1 at (-1.15, -6.51) with 0.16 m clearance,
+    # run 10 at (0.48, -6.65) with 0.30 m. Only two gaps through it fit the airframe, at
+    # x ~ -0.25 (0.56 m) and x ~ +1.50 (0.74 m), so the straight-through path never could.
+    #
+    # The entry module's job is to get INSIDE, not to solve the interior. It now stops at
+    # y = -7.0 (0.81 m clearance, comfortably clear) and hands over; routing around the
+    # obstacle is FUEL's job, and it has the inflation to do it safely.
+    entry_confirm_depth: 0.5
+    # Hard cap on how far past the confirm line the forward setpoint may reach, so the vehicle
+    # cannot coast into the tight zone while the crossing test is still latching.
+    approach_stop_margin: 0.25
+
+    # --- Approach corridor -----------------------------------------------------------
+    # These exist because the 2026-09-05 entry attempt flew into the door jamb. The
+    # vehicle reached the opening 1.04 m off centre; the door spans +-0.95 m and the
+    # airframe has a 0.384 m collision radius, leaving only +-0.566 m of real clearance,
+    # so it clipped the west jamb, tumbled (pitch -39.5 deg) and ended up on the floor.
+    # The known door position is now the primary lateral reference and the vehicle will
+    # not advance while misaligned.
+    #
+    # Maximum lateral error tolerated before forward motion is allowed at all.
+    align_tolerance: 0.20
+    # How far ahead of the vehicle the forward setpoint may sit along the approach corridor.
+    # This IS the speed command: PX4's position controller turns the lead into a properly
+    # damped motion. There is deliberately NO lateral gain any more -- the door centreline is
+    # commanded as an absolute position, not servoed. The previous proportional lateral
+    # controller was an outer position loop wrapped around PX4's own, and the two fought:
+    # 2.01 m peak-to-peak lateral limit cycle at 0.17 Hz, in antiphase with its own setpoint,
+    # ending in a -22 deg pitch excursion and flight termination (2026-09-05 09:03).
+    approach_lead: 0.6
+    # Hysteresis on the advance gate: start advancing below align_tolerance, keep advancing
+    # until the error exceeds align_release. Without it the vehicle chatters across the
+    # threshold as it settles and creeps forward in stop-start bursts.
+    # 2026-09-05: 0.40 was unsafe by construction. Slicing ARINA_NIDAR.STL at the 1.40 m cruise
+    # height, the usable lane 0.9 m behind the door (>=0.384 m clearance) is x [-0.54, +0.09] --
+    # 0.63 m wide, and centred on x = -0.225, i.e. OFFSET from the doorway it belongs to. A 0.40 m
+    # permitted lateral error is larger than that lane's 0.315 m half-width, so the vehicle could
+    # sit "within tolerance" and still be in the wall. Measured: it parked at x = +0.27 with
+    # 0.340 m to the nearest wall, inside its own 0.384 m radius, and A* then refused to expand
+    # from the occupied start on 33320 consecutive replans.
+    # Keep this BELOW the narrowest lane's half-width for the active arena.
+    align_release: 0.25
+    # How far the LiDAR gap detector may shift the configured door centre. The detector
+    # REFINES the known geometry; it does not replace it. Letting it replace the prior
+    # deadlocked the approach on 2026-09-05 09:28: the vehicle sat 1 cm off the centreline
+    # while the detector insisted the gap was 0.25 m away -- outside align_tolerance -- so
+    # forward motion was held indefinitely and it stalled inside the doorway.
+    detector_refine_limit: 0.10
+    # Hard clamp on the commanded setpoint's offset from the door centreline. Must stay
+    # below half_door_width - vehicle.collision_radius (0.95 - 0.384 = 0.566).
+    corridor_half_width: 0.45
+    # Radius around the pad within which the vehicle counts as "still on the pad". The EDM
+    # refuses to command motion unless it has seen the vehicle here, on the ground, first.
+    pad_radius: 1.0
+    # How long to hold inside the arena waiting for FUEL's subscriber before giving up. The
+    # handover trigger is a one-shot publish; firing it before exploration_node has subscribed
+    # silently drops it and the vehicle hovers on a stale setpoint (seen 2026-09-05 08:31).
+    fuel_trigger_timeout: 60.0
+    # Estimator-reset handling. EKF2 snaps its horizontal position occasionally; a 1.87 m reset
+    # on 2026-09-05 was chased by the approach controller until the vehicle exceeded the 60 deg
+    # tilt limit and PX4's FailureDetector terminated the flight. A step larger than this in a
+    # single ~30 Hz pose sample is a reset, not motion (it would imply >9 m/s).
+    pose_jump_threshold: 0.30
+    # Quiet time required after a reset before the approach resumes, and before the vehicle is
+    # allowed to leave the pad at all (alignment resets cluster just after takeoff).
+    settle_time: 3.0
+
+  # ---------------------------------------------------------------------------
+  # FLIGHT ENVELOPE GUARD
+  # ---------------------------------------------------------------------------
+  guard:
+    # EXPLORE envelope: the arena interior. Active once inside.
+    # This block ALSO derives FUEL's sdf_map box (see apply_mission_config.py); the flight
+    # envelope the guard enforces comes from `mission:` below, so widening this does not
+    # widen what the vehicle is allowed to fly through.
+    explore:
+      x_min: -7.0
+      x_max: 7.0
+      # 2026-09-05: was -7.0, which put the box's southern edge at world y = -6.8 -- 0.7 m
+      # INSIDE the arena, past the door. FUEL therefore could not plan anywhere near the
+      # doorway, and the EDM had to hand over deep in the 0.63 m entry corridor where the
+      # vehicle does not reliably fit. Extending to the arena's own south wall lets the
+      # handover happen at the door mouth, where measured clearance is 0.999 m.
+      y_min: -7.5
+      y_max: 7.0
+    # MISSION envelope: must also contain the pad and the transit corridor, otherwise
+    # every setpoint outside the arena is rejected and the vehicle can never leave the
+    # pad. Extends south to cover the pad at y = -9.5.
+    mission:
+      x_min: -7.0
+      x_max: 7.0
+      y_min: -10.5
+      y_max: 7.0
+    boundary_margin: 0.2
+    boundary_margin_z: 0.03
+    z_min: 1.45
+    z_max: 1.55
+    publish_rate: 20.0
+    vision_timeout: 1.0
+    range_timeout: 1.0
+
+  # ---------------------------------------------------------------------------
+  # SURVIVOR DETECTION  (not yet implemented - config reserved)
+  # ---------------------------------------------------------------------------
+  detection:
+    enabled: false
+    model: yolov8n.pt
+    confidence_threshold: 0.40
+    classes: [person]
+    input_topic: /camera/image_raw
+    output_topic: /detections
+    marker_topic: /survivor_markers
+    # Detections within this radius of an existing tag are treated as the same
+    # survivor. Half the 2 m room pitch, so adjacent rooms never merge.
+    duplicate_suppression_radius: 1.5
+    grid_size: 2.0               # competition grid cell, metres
+
+  # ---------------------------------------------------------------------------
+  # MISSION SEQUENCING
+  # ---------------------------------------------------------------------------
+  mission:
+    phases: [IDLE, ARM, TAKEOFF, TRANSIT_IN, EXPLORE, TRANSIT_OUT, DESCEND, LAND, DISARM]
+    clock_limit_s: 1800.0        # 30 min hard limit per the rules
+    explore_no_frontier_hold_s: 10.0
+    coverage_plateau_window_s: 60.0
+    coverage_plateau_threshold: 0.01
+    breadcrumb_rate_hz: 1.0      # entry-path sampling for the reverse transit

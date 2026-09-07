@@ -1,37 +1,37 @@
 <?xml version="1.0" ?>
-<sdf version="1.5">
-  <world name="nidar_competition_world">
-    <!-- Directional Light -->
+<!-- GENERATED FILE - do not edit by hand.
+     Rendered from catkin_ws/src/nidar_mission/config/mission_config.yaml by nidar_mission/scripts/apply_mission_config.py.
+     Change the arena or pad there and re-run the generator. -->
+<sdf version="1.6">
+  <world name="nidar_competition">
+
     <include>
       <uri>model://sun</uri>
     </include>
 
-    <!-- Ground Plane -->
     <include>
       <uri>model://ground_plane</uri>
     </include>
 
-    <!-- NIDAR Arena DAE Mesh Model -->
     <include>
-      <name>nidar_arena</name>
-      <uri>model://nidar_arena</uri>
-      <pose>0 0 0 0 0 0</pose>
+      <name>arina_nidar</name>
+      <uri>model://arina_nidar</uri>
+      <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
     </include>
 
-    <!-- Physics Engine Configuration -->
-    <physics name="default_physics" default="0" type="ode">
-      <gravity>0 0 -9.8066</gravity>
+    <!-- The pad model self-centres (its own origin is the pad centre), so this pose is
+         simply launch_pad.center from mission_config.yaml. -->
+    <include>
+      <name>launch_pad</name>
+      <uri>model://launch_pad</uri>
+      <pose>0.0 -9.5 0 0 0 0</pose>
+    </include>
+
+    <physics name="default_physics" default="true" type="ode">
       <max_step_size>0.004</max_step_size>
       <real_time_factor>1.0</real_time_factor>
       <real_time_update_rate>250</real_time_update_rate>
-      <magnetic_field>6.0e-06 2.3e-05 -4.2e-05</magnetic_field>
     </physics>
 
-    <!-- Scene lighting / shadows -->
-    <scene>
-      <ambient>0.5 0.5 0.5 1.0</ambient>
-      <background>0.15 0.15 0.15 1.0</background>
-      <shadows>false</shadows>
-    </scene>
   </world>
 </sdf>

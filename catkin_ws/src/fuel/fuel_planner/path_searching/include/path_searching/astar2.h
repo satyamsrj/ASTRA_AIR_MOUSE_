@@ -53,10 +53,18 @@ public:
 
   double lambda_heu_;
   double max_search_time_;
+  // How far search() may move the plan origin when the vehicle is parked inside an obstacle.
+  double escape_radius_;
 
 private:
   void backtrack(const NodePtr& end_node, const Eigen::Vector3d& end);
   void posToIndex(const Eigen::Vector3d& pt, Eigen::Vector3i& idx);
+  // A cell A* is allowed to stand on: inside the search box, not inflated-occupied, not unknown.
+  // Mirrors the neighbour test in search() exactly -- keep the two in step.
+  bool isAdmissible(const Eigen::Vector3d& pt);
+  // Nearest admissible cell to `from` within escape_radius_. Used to rescue a plan whose start
+  // is buried in the inflated band; see the comment at the top of search().
+  bool findNearestAdmissible(const Eigen::Vector3d& from, Eigen::Vector3d& out);
   double getDiagHeu(const Eigen::Vector3d& x1, const Eigen::Vector3d& x2);
   double getManhHeu(const Eigen::Vector3d& x1, const Eigen::Vector3d& x2);
   double getEuclHeu(const Eigen::Vector3d& x1, const Eigen::Vector3d& x2);

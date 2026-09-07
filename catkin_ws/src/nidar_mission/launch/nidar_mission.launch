@@ -1,0 +1,26 @@
+<launch>
+  <!-- NIDAR mission layer.
+
+       Loads the central configuration onto the parameter server and starts the mission
+       nodes that consume it. This is additive: it does NOT start Gazebo, PX4, FAST-LIO or
+       FUEL - scripts/test_takeoff.sh brings those up, and this launch layers the mission
+       logic on top.
+
+       Everything under /nidar/... comes from one file, so the EDM, the mission manager and
+       (later) the survivor detector all read the same numbers. Values that cannot be served
+       from the parameter server - FAST-LIO's own YAML, FUEL's roslaunch literals, the Gazebo
+       world - are rendered by scripts/apply_mission_config.py instead; run that after
+       editing the config. -->
+
+  <arg name="config" default="$(find nidar_mission)/config/mission_config.yaml"/>
+  <arg name="entry_enabled" default="true"/>
+
+  <rosparam command="load" file="$(arg config)"/>
+
+  <!-- Autonomous arena entry. Drives /planning/pos_cmd (validated by
+       flight_envelope_guard.py) from the launch pad, through the arena opening, and hands
+       over to FUEL once inside. -->
+  <node if="$(arg entry_enabled)"
+        pkg="nidar_mission" type="entry_detection_module.py" name="entry_detection_module"
+        output="screen"/>
+</launch>

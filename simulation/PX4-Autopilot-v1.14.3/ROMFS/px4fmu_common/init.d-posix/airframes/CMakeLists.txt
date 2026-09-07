@@ -46,6 +46,8 @@ px4_add_romfs_files(
 	1021_gazebo-classic_uuv_hippocampus
 	1022_gazebo-classic_uuv_bluerov2_heavy
 	1023_gazebo-classic_iris_vlp16
+	1024_gazebo-classic_iris_vlp16_cam
+	1025_gazebo-classic_x500_vlp16
 	1030_gazebo-classic_plane
 	1031_gazebo-classic_plane_cam
 	1032_gazebo-classic_plane_catapult

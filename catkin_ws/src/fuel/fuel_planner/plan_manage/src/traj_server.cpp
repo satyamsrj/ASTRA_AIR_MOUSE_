@@ -5,6 +5,7 @@
 #include "std_msgs/Empty.h"
 #include "visualization_msgs/Marker.h"
 #include <ros/ros.h>
+#include <std_msgs/Bool.h>
 #include <poly_traj/polynomial_traj.h>
 #include <active_perception/perception_utils.h>
 
@@ -32,6 +33,12 @@ shared_ptr<PerceptionUtils> percep_utils_;
 
 // Info of replan
 bool receive_traj_ = false;
+// Set once FUEL declares exploration finished. traj_server otherwise keeps publishing the last
+// trajectory's hold point forever, and /position_cmd is remapped onto the SAME
+// /planning/pos_cmd the mission layer uses for the return leg -- so without this the two would
+// both drive the guard at once and the vehicle would sit between two setpoints. Handing the
+// topic over cleanly is what makes RETURN possible at all.
+bool exploration_done_ = false;
 double replan_time_;
 // Fixed-altitude 2D flight: hard Z pin, camera_init frame (world = z_cruise_ + 0.1). Initialized
 // here as well as from the param server because cmd_timer is created before the params are read in
@@ -259,9 +266,19 @@ void bsplineCallback(const bspline::BsplineConstPtr& msg) {
   }
 }
 
+void explorationCompletedCallback(const std_msgs::Bool::ConstPtr& msg) {
+  if (msg->data && !exploration_done_) {
+    exploration_done_ = true;
+    ROS_WARN("[Traj server] exploration complete: releasing /planning/pos_cmd to the mission "
+             "layer for the return leg.");
+  }
+}
+
 void cmdCallback(const ros::TimerEvent& e) {
   // No publishing before receive traj data
   if (!receive_traj_) return;
+  // Yield the topic once exploration is over; see exploration_done_.
+  if (exploration_done_) return;
 
   ros::Time time_now = ros::Time::now();
   double t_cur = (time_now - start_time_).toSec();
@@ -456,6 +473,9 @@ int main(int argc, char** argv) {
   ros::Subscriber new_sub = node.subscribe("planning/new", 10, newCallback);
   ros::Subscriber odom_sub = node.subscribe("/odom_world", 50, odomCallbck);
   ros::Subscriber pg_T_vio_sub = node.subscribe("/loop_fusion/pg_T_vio", 10, pgTVioCallback);
+
+  ros::Subscriber expl_done_sub =
+      node.subscribe("/exploration_completed", 1, explorationCompletedCallback);
 
   cmd_vis_pub = node.advertise<visualization_msgs::Marker>("planning/position_cmd_vis", 10);
   pos_cmd_pub = node.advertise<quadrotor_msgs::PositionCommand>("/position_cmd", 50);

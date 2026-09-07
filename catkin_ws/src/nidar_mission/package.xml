@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>nidar_mission</name>
+  <version>0.1.0</version>
+  <description>
+    Mission-level orchestration for the NIDAR AirMouse drone: central configuration,
+    autonomous arena entry detection, and the mission phase state machine. Sits above
+    FAST-LIO (localisation) and FUEL (exploration) and drives them through the
+    flight envelope guard.
+  </description>
+
+  <maintainer email="singhayush5062@gmail.com">Ayush Singh</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>mavros_msgs</depend>
+  <!-- PositionCommand, the message /planning/pos_cmd carries -->
+  <depend>quadrotor_msgs</depend>
+  <depend>tf</depend>
+</package>

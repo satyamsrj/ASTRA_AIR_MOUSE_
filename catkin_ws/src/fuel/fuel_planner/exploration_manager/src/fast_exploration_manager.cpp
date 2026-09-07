@@ -51,6 +51,11 @@ void FastExplorationManager::initialize(ros::NodeHandle& nh) {
   nh.param("exploration/max_decay", ep_->max_decay_, -1.0);
   nh.param("exploration/tsp_dir", ep_->tsp_dir_, string("null"));
   nh.param("exploration/relax_time", ep_->relax_time_, 1.0);
+  nh.param("exploration/target_switch_margin", ep_->target_switch_margin_, 1.0);
+  nh.param("exploration/target_fail_limit", ep_->target_fail_limit_, 5);
+  nh.param("exploration/target_reached_dist", ep_->target_reached_dist_, 0.4);
+  nh.param("exploration/target_match_dist", ep_->target_match_dist_, 2.0);
+  ed_->has_last_target_ = false;
 
   nh.param("exploration/vm", ViewNode::vm_, -1.0);
   nh.param("exploration/am", ViewNode::am_, -1.0);
@@ -109,6 +114,7 @@ int FastExplorationManager::planExploreMotion(
 
   if (ed_->frontiers_.empty()) {
     ROS_WARN("No coverable frontier.");
+    ed_->has_last_target_ = false;  // nothing left to commit to; drop any held target
     return NO_FRONTIER;
   }
   frontier_finder_->getTopViewpointsInfo(pos, ed_->points_, ed_->yaws_, ed_->averages_);
@@ -221,6 +227,55 @@ int FastExplorationManager::planExploreMotion(
   } else
     ROS_ERROR("Empty destination.");
 
+  // ---- Target hysteresis -------------------------------------------------------------
+  // Everything above recomputes the next viewpoint from scratch on every replan and simply
+  // takes whichever candidate is cheapest right now. Once the map is mostly explored the
+  // surviving frontiers have near-identical cost, so millimetre-scale changes in pos/vel flip
+  // which one wins and the vehicle chases a new heading every cycle instead of flying to any
+  // of them. Measured on a clean 482 s flight: the commanded target changed on 12 of 12
+  // consecutive 5 s samples, mean 1.1 m and 99 deg of yaw per change, yielding a persistent
+  // ~5 s-period 1.1-1.6 deg roll/pitch oscillation and 15.7 deg mean yaw tracking error.
+  //
+  // Defend the committed target: only abandon it for a challenger that is better by more than
+  // target_switch_margin_ seconds of cost. computeCost() returns seconds
+  // (max(path_len/vm, yaw_diff/yd)), so the default 1.0 s is worth ~0.6 m of path or ~60 deg
+  // of yaw at the configured limits. The hold releases on its own in three ways:
+  //   1. the target is reached (within target_reached_dist_),
+  //   2. no active viewpoint sits near it any more -- its frontier was cleared, so continuing
+  //      would fly to a spot with nothing left to see,
+  //   3. a genuinely better target appears (beats the margin).
+  // Note the hold is self-reinforcing in the right way: as the vehicle turns toward the held
+  // target its yaw cost falls, so a committed target naturally gets cheaper to keep.
+  if (ep_->target_switch_margin_ > 0.0 && ed_->has_last_target_) {
+    const bool reached = (ed_->last_next_pos_ - pos).norm() < ep_->target_reached_dist_;
+
+    bool still_active = false;
+    for (const auto& p : ed_->points_) {
+      if ((p - ed_->last_next_pos_).norm() < ep_->target_match_dist_) {
+        still_active = true;
+        break;
+      }
+    }
+
+    if (!reached && still_active) {
+      vector<Vector3d> tmp_path;
+      const double cost_last = ViewNode::computeCost(
+          pos, ed_->last_next_pos_, yaw[0], ed_->last_next_yaw_, vel, yaw[1], tmp_path);
+      const double cost_new =
+          ViewNode::computeCost(pos, next_pos, yaw[0], next_yaw, vel, yaw[1], tmp_path);
+
+      if (cost_new > cost_last - ep_->target_switch_margin_) {
+        // Challenger is not decisively better -- keep flying to the committed target.
+        next_pos = ed_->last_next_pos_;
+        next_yaw = ed_->last_next_yaw_;
+      }
+    }
+  }
+  ed_->last_next_pos_ = next_pos;
+  ed_->last_next_yaw_ = next_yaw;
+  ed_->has_last_target_ = true;
+  // ---- end target hysteresis ---------------------------------------------------------
+
   std::cout << "Next view: " << next_pos.transpose() << ", " << next_yaw << std::endl;
 
   // Plan trajectory (position and yaw) to the next viewpoint
@@ -234,8 +289,24 @@ int FastExplorationManager::planExploreMotion(
   planner_manager_->path_finder_->reset();
   if (planner_manager_->path_finder_->search(pos, next_pos) != Astar::REACH_END) {
     ROS_ERROR("No path to next viewpoint");
+    // Release the hysteresis hold before bailing out -- but NOT on the first failure. A
+    // committed target that has genuinely become unreachable would otherwise be re-selected
+    // and re-fail forever, so the hold has to break eventually; the original code broke it
+    // immediately, which is too eager. Measured 2026-09-05: 1141 no-path failures in one
+    // flight, each one disarming the anti-thrash hysteresis, so 26 of 95 target changes were
+    // returns to targets already abandoned -- the vehicle ping-ponged between two attractors.
+    // A* legitimately misses on one cycle and succeeds on the next while the map fills in, so
+    // require a run of failures against the SAME target before giving up on it.
+    if (++ed_->target_fail_streak_ >= ep_->target_fail_limit_) {
+      ROS_WARN("[FSM] target unreachable %d cycles running; releasing the held target.",
+               ed_->target_fail_streak_);
+      ed_->has_last_target_ = false;
+      ed_->target_fail_streak_ = 0;
+    }
     return FAIL;
   }
+  // Reached here means A* found a route to the held target, so the failure run is over.
+  ed_->target_fail_streak_ = 0;
   ed_->path_next_goal_ = planner_manager_->path_finder_->getPath();
   shortenPath(ed_->path_next_goal_);
 

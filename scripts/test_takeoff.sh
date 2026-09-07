@@ -1,9 +1,26 @@
 #!/bin/bash
+# Spawn pose and vehicle model default to whatever
+# catkin_ws/src/nidar_mission/config/mission_config.yaml says, so moving the launch pad or
+# switching the airframe is a one-line config edit rather than a hunt through shell scripts.
+# Explicit positional arguments still override, and the hardcoded fallbacks after ":-" keep the
+# script working if PyYAML or the config file is unavailable.
+MISSION_CFG="$(dirname "$0")/../catkin_ws/src/nidar_mission/config/mission_config.yaml"
+cfg() {  # cfg <python-expression-over-`c`>  <fallback>
+    python3 -c "
+import yaml,sys
+try:
+    c=yaml.safe_load(open('$MISSION_CFG'))['nidar']
+    print($1)
+except Exception:
+    print('$2')
+" 2>/dev/null || echo "$2"
+}
 GUI_ARG=${1:-true}
-SPAWN_X=${2:-0.0}
-SPAWN_Y=${3:--6.5}
-SPAWN_Z=${4:-0.1}
-SPAWN_YAW=${5:-1.5708}
+SPAWN_X=${2:-$(cfg "c['launch_pad']['center']['x']" 0.0)}
+SPAWN_Y=${3:-$(cfg "c['launch_pad']['center']['y']" -6.5)}
+SPAWN_Z=${4:-$(cfg "round(c['launch_pad']['thickness']+c['vehicle']['belly_clearance'],3)" 0.19)}
+SPAWN_YAW=${5:-$(cfg "c['launch_pad']['spawn_yaw']" 1.5708)}
+VEHICLE=${VEHICLE:-$(cfg "c['vehicle']['model']" iris_vlp16)}
 # RViz is controlled separately from the Gazebo GUI and defaults to OFF, because it is by far the
 # most expensive optional process in this stack: measured at ~290% CPU, i.e. roughly 3 of this
 # machine's 12 hardware threads, purely for visualisation. Leaving it off gives FAST-LIO and
@@ -11,7 +28,7 @@ SPAWN_YAW=${5:-1.5708}
 #     RVIZ=1 ./scripts/test_takeoff.sh true 0.0 -6.5 0.1 1.5708
 RVIZ_ARG=${RVIZ:-0}
 if [ "$RVIZ_ARG" = "1" ] || [ "$RVIZ_ARG" = "true" ]; then RVIZ_ARG=true; else RVIZ_ARG=false; fi
-echo "Starting clean FUEL exploration test (GUI=${GUI_ARG}) at position (X=${SPAWN_X}, Y=${SPAWN_Y}, Z=${SPAWN_Z}, Yaw=${SPAWN_YAW})..."
+echo "Starting clean FUEL exploration test (GUI=${GUI_ARG}, vehicle=${VEHICLE}) at position (X=${SPAWN_X}, Y=${SPAWN_Y}, Z=${SPAWN_Z}, Yaw=${SPAWN_YAW})..."
 
 # Ensure clean slate
 killall -9 rosmaster rosout roslaunch gzserver gzclient px4 mavros_node rostopic px4-simulator_mavlink 2>/dev/null || true
@@ -32,6 +49,9 @@ pkill -f cpu_repin_loop.sh 2>/dev/null || true
 # / 3 px4 / 2 fastlio_mapping processes and diverged to (-26, 56) within 30 s of takeoff.
 pkill -f rviz 2>/dev/null || true
 pkill -f mission_telemetry_logger.py 2>/dev/null || true
+pkill -f flightlog/record.py 2>/dev/null || true
+pkill -f flightlog/watchdog.py 2>/dev/null || true
+pkill -f entry_detection_module.py 2>/dev/null || true
 # robot_state_publisher / static_transform_publisher are started by nidar_mapping.launch and are
 # not among the `killall` names either, so they accumulate across runs -- five of them were found
 # alive with no simulation running.
@@ -77,7 +97,7 @@ pin_process() {
 }
 
 source /home/developer/NIDAR/scripts/setup_env.sh
-roslaunch px4 mavros_posix_sitl.launch vehicle:=iris_vlp16 world:=/home/developer/NIDAR/nidar_competition.world gui:=$GUI_ARG interactive:=false x:=$SPAWN_X y:=$SPAWN_Y z:=$SPAWN_Z Y:=$SPAWN_YAW > /tmp/sim_test.log 2>&1 &
+roslaunch px4 mavros_posix_sitl.launch vehicle:=$VEHICLE world:=/home/developer/NIDAR/nidar_competition.world gui:=$GUI_ARG interactive:=false x:=$SPAWN_X y:=$SPAWN_Y z:=$SPAWN_Z Y:=$SPAWN_YAW > /tmp/sim_test.log 2>&1 &
 SIM_PID=$!
 
 echo "Waiting for MAVROS to connect to PX4 (up to 60 seconds)..."
@@ -155,6 +175,68 @@ echo "Starting CPU-core re-pin loop (catches worker threads gzserver/px4 spawn a
 echo "Setting PX4 Takeoff Altitude parameter to 1.5m..."
 rosrun mavros mavparam set MIS_TAKEOFF_ALT 1.5 >/dev/null 2>&1 || true
 
+# FUEL starts before arming too. Its frontier box (box_min/max in nidar_fuel_upstream.launch)
+# covers only the arena interior -- world y in [-6.8, 6.8], x in [-6.8, 6.8] -- so bringing it
+# up early cannot produce frontiers outside the arena, and it stays idle until it receives a
+# waypoint trigger. Starting it late is what broke the 08:30 run: the EDM crossed the door and
+# published its handover trigger ~10 s after FUEL launched, before exploration_node had
+# registered its subscriber, so the trigger was dropped and the vehicle hovered inside the
+# arena on a stale setpoint for the rest of the run.
+echo "============================================================"
+echo "Launching Upstream FUEL Exploration Stack..."
+echo "============================================================"
+roslaunch /home/developer/NIDAR/launch/nidar_fuel_upstream.launch > /tmp/fuel.log 2>&1 &
+FUEL_PID=$!
+sim_sleep 5
+
+# ---------------------------------------------------------------------------------------
+# Flight recorder. Captures ONLY what dies with the simulation: the occupancy map, FUEL's
+# commanded setpoints, the selected viewpoint and the coverage series. Ground truth is left
+# to PX4's own .ulg (higher rate, already being written) and merged afterwards by pack.py.
+#
+# This exists because /tmp/fuel.log is TRUNCATED on every launch and the map was never saved
+# at all, so a finished run left nothing an external evaluator could recompute coverage from.
+# Set NIDAR_FLIGHTLOG=0 to skip it.
+if [ "${NIDAR_FLIGHTLOG:-1}" != "0" ]; then
+  python3 /home/developer/NIDAR/tools/flightlog/record.py > /tmp/flightlog.log 2>&1 &
+  FLIGHTLOG_PID=$!
+  echo "Flight recorder started (pid $FLIGHTLOG_PID) -> logs/runs/"
+
+  # Watchdog. A PX4 crash DEADLOCKS this simulation rather than ending it -- lockstep means
+  # gzserver waits forever for actuator outputs that a terminated controller never sends, so a
+  # dead run sits at RTF ~0.005 until someone notices. This ends the run on a crash, on a PX4
+  # failsafe announcement, on a stalled clock, or on disarm, packing the bundle before it
+  # tears anything down. NIDAR_WATCHDOG=0 to disable, NIDAR_WATCHDOG_ARGS for thresholds.
+  if [ "${NIDAR_WATCHDOG:-1}" != "0" ]; then
+    python3 -u /home/developer/NIDAR/tools/flightlog/watchdog.py \
+      ${NIDAR_WATCHDOG_ARGS:-} > /tmp/watchdog.log 2>&1 &
+    WATCHDOG_PID=$!
+    echo "Crash watchdog started (pid $WATCHDOG_PID) -> /tmp/watchdog.log"
+  fi
+fi
+
+# ---------------------------------------------------------------------------------------
+# The mission layer starts BEFORE arming, on purpose.
+#
+# It used to start after the vehicle was already airborne and in OFFBOARD. That left a ~10 s
+# window in which the vehicle was flying with no mission module alive: the only setpoint
+# source was flight_envelope_guard.py's fallback hover-hold, whose target is derived from
+# /mavros/local_position/pose while EKF2 is still completing its external-vision alignment.
+# On 2026-09-05 the vehicle drifted from world x=+0.60 to x=-1.04 during that window; the EDM
+# then started, seeded its setpoint from wherever the vehicle had ended up, and drove that
+# 1 m lateral error straight into the door jamb (the opening is only +-0.95 m wide).
+# Starting the EDM first lets it hold the pad through the climb and own the whole approach.
+# ---------------------------------------------------------------------------------------
+# Mission layer: loads mission_config.yaml onto the parameter server and, when entry is
+# enabled, starts the Entry Detection Module. ENTRY=0 skips it and falls back to the old
+# behaviour of triggering FUEL immediately (useful when spawning inside the arena).
+ENTRY_ARG=${ENTRY:-1}
+if [ "$ENTRY_ARG" = "1" ] || [ "$ENTRY_ARG" = "true" ]; then ENTRY_ARG=true; else ENTRY_ARG=false; fi
+echo "Launching NIDAR mission layer (entry_enabled=${ENTRY_ARG})..."
+roslaunch nidar_mission nidar_mission.launch entry_enabled:=$ENTRY_ARG > /tmp/mission.log 2>&1 &
+MISSION_PID=$!
+sim_sleep 3
+
 echo "Setting MAVROS Mode to AUTO.TAKEOFF for Arming..."
 rosrun mavros mavsys mode -c AUTO.TAKEOFF
 sim_sleep 1
@@ -192,12 +274,13 @@ while not rospy.is_shutdown() and (rospy.Time.now() - start).to_sec() < 30.0:
     rospy.sleep(0.5)
 "
 
-echo "============================================================"
-echo "Launching Upstream FUEL Exploration Stack..."
-echo "============================================================"
-roslaunch /home/developer/NIDAR/launch/nidar_fuel_upstream.launch > /tmp/fuel.log 2>&1 &
-FUEL_PID=$!
-sim_sleep 5
+if [ "$ENTRY_ARG" = "true" ]; then
+    # The EDM owns the handover: it flies the vehicle from the pad through the arena opening
+    # and only then publishes the FUEL waypoint trigger itself. Triggering FUEL here as well
+    # would put traj_server and the EDM on /planning/pos_cmd simultaneously, which is exactly
+    # the kind of two-publisher contention that has bitten this stack before.
+    echo "Entry Detection Module active - it will trigger FUEL after crossing the arena door."
+else
 
 echo "Publishing trigger to start autonomous exploration..."
 python3 -c "
@@ -222,6 +305,7 @@ for i in range(15):
     rate.sleep()
 print('[Trigger] Waypoint trigger published successfully.')
 " > /tmp/trigger.log 2>&1
+fi
 sim_sleep 2
 
 echo "============================================================"
@@ -230,5 +314,17 @@ echo "Architecture: FAST-LIO2 -> Upstream FUEL -> Flight Envelope Guard -> MAVRO
 echo "============================================================"
 
 /home/developer/NIDAR/scripts/mission_telemetry_logger.py
+
+# The telemetry logger above runs in the foreground, so reaching here means the run is over.
+# Stop the recorder cleanly (its shutdown hook writes a final flush) and consolidate the
+# bundle while /tmp/fuel.log still holds THIS run -- the next launch truncates it.
+if [ -n "${WATCHDOG_PID:-}" ]; then
+  kill -TERM "$WATCHDOG_PID" 2>/dev/null || true
+fi
+if [ -n "${FLIGHTLOG_PID:-}" ]; then
+  kill -INT "$FLIGHTLOG_PID" 2>/dev/null || true
+  wait "$FLIGHTLOG_PID" 2>/dev/null || true
+  python3 /home/developer/NIDAR/tools/flightlog/pack.py --fuel-log /tmp/fuel.log || true
+fi
 
 echo "Simulation test execution complete."

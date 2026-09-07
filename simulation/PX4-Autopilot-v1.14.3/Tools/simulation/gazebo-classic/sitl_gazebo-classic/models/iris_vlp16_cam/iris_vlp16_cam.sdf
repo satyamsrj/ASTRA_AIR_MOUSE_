@@ -1,0 +1,498 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <model name="iris_vlp16_cam">
+    <!-- Include base Iris quadrotor with full motor controllers and mavlink_interface -->
+    <include>
+      <uri>model://iris</uri>
+    </include>
+
+    <!-- Velodyne VLP-16 LiDAR Link -->
+    <link name="velodyne_link">
+      <pose>0 0 0.12 0 0 0</pose>
+      <inertial>
+        <mass>0.83</mass>
+        <inertia>
+          <ixx>0.000908</ixx>
+          <iyy>0.000908</iyy>
+          <izz>0.001104</izz>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyz>0</iyz>
+        </inertia>
+      </inertial>
+      
+      <visual name="velodyne_visual">
+        <geometry>
+          <cylinder>
+            <radius>0.0516</radius>
+            <length>0.0717</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/DarkGrey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+
+      <sensor type="ray" name="velodyne-VLP16">
+        <pose>0 0 0 0 0 0</pose>
+        <visualize>false</visualize>
+        <update_rate>10</update_rate>
+        <ray>
+          <scan>
+            <horizontal>
+              <samples>1800</samples>
+              <resolution>1</resolution>
+              <min_angle>-3.14159265359</min_angle>
+              <max_angle>3.14159265359</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>16</samples>
+              <resolution>1</resolution>
+              <min_angle>-0.261799</min_angle>
+              <max_angle>0.261799</max_angle>
+            </vertical>
+          </scan>
+          <range>
+            <min>0.1</min>
+            <max>130.0</max>
+            <resolution>0.001</resolution>
+          </range>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.008</stddev>
+          </noise>
+        </ray>
+        
+        <plugin name="gazebo_ros_laser_controller" filename="libgazebo_ros_velodyne_laser.so">
+          <topicName>/velodyne_points</topicName>
+          <frameName>velodyne_link</frameName>
+          <min_range>0.1</min_range>
+          <max_range>130.0</max_range>
+          <gaussianNoise>0.008</gaussianNoise>
+        </plugin>
+      </sensor>
+    </link>
+
+    <!-- Attach velodyne_link to iris::base_link -->
+    <joint name="velodyne_joint" type="fixed">
+      <parent>iris::base_link</parent>
+      <child>velodyne_link</child>
+    </joint>
+    <!-- TFmini Plus downward rangefinder, for fixed-altitude 2D flight.
+
+         Included as a nested model with a matching joint, exactly mirroring the stock
+         iris_opt_flow.sdf lidar mounting. BOTH names are load-bearing, and it is the JOINT name
+         that actually drives PX4 discovery:
+
+           * gazebo_lidar_plugin.cpp:108-124 builds the Gazebo transport topic from the sensor's
+             scoped link name "iris_vlp16::tfmini_lidar::link", taking the second-to-last element,
+             so it publishes on  ~/iris_vlp16/link/tfmini_lidar.
+           * gazebo_mavlink_interface.cpp:126-176 scans model_->GetJoints() for a joint name
+             matching .*(lidar|sf10a)(.*), strips the trailing "_joint", and subscribes to
+             ~/<model>/link/<that name>.
+
+         "tfmini_lidar_joint" -> "tfmini_lidar" makes the two sides meet. Renaming either the model
+         or the joint, or dropping the "_joint" suffix, silently breaks MAVLink DISTANCE_SENSOR
+         while the ROS /tfmini/range topic keeps working, which would leave EKF2_HGT_REF=2 with
+         no height source at all. Note the nested-model branch of that same function cannot help
+         here: it only ever inspects NestedModels()[0], which for this vehicle is "iris".
+
+         See PLANNING_DOCS/fixed_altitude_2d_flight_architecture_2026-09-03.md Sec 15. -->
+    <include>
+      <uri>model://tfmini_lidar</uri>
+      <!-- Mounted UNDER the airframe like the camera. The collision box is 0.035 m tall and
+           centred on the link, so seating its top face on the belly (z = -0.055) puts the link
+           at -0.055 - 0.0175 = -0.0725.
+           This was -0.05, which left the box spanning -0.0675 .. -0.0325, so the upper two
+           thirds buried in the fuselage. The mesh is corner-origin (0..35 mm in z) and its
+           visual carried no offset, so the drawn body sat 0.0175 m above the collision box and
+           deeper still into the airframe; model.sdf now centres the visual to match. -->
+      <pose>0 0 -0.0725 0 0 -1.5707963</pose>
+    </include>
+
+    <joint name="tfmini_lidar_joint" type="fixed">
+      <parent>iris::base_link</parent>
+      <child>tfmini_lidar::link</child>
+    </joint>
+
+    <!-- ================================================================================
+         Landing gear.
+
+         The stock iris DRAWS legs in its visual mesh but gives them no collision at all: its
+         only collision body is the 0.47 x 0.47 x 0.11 fuselage box, so the vehicle rests on its
+         belly at z = -0.055. That was harmless while nothing hung underneath.
+
+         It stopped being harmless once the A8 mini was mounted on the belly: the camera reaches
+         z = -0.139, making it the lowest object on the airframe by 84 mm, so every landing would
+         put the full touchdown load through the camera body.
+
+         Four legs, 0.200 m long centred at z = -0.100: the top reaches z = 0.0 so they meet the
+         visible frame rather than floating below it, and each foot sits at z = -0.200,
+         clearing the camera by 61 mm. Length is set by the RANGEFINDER, not the camera: the
+         TFmini sits 0.0725 below base_link and cannot read closer than 0.10 m, so the rest
+         height must keep it clear of that floor:
+             range parked = foot_depth - 0.0725
+         At -0.200 that is 0.1275 m, 27 mm of margin. DO NOT shorten past -0.1725: the sensor
+         then reads under its own minimum, FAST-LIO rejects every sample, the Z pin is lost and
+         with EKF2_HGT_REF=2 the height reference collapses. That is exactly the 2026-09-06
+         crash, where -0.190 legs sagged to a 0.0784 m reading. Placed at +-0.13 m in x and y: inboard of the 0.47 m
+         fuselage box and clear of the rotor arms, wide enough that the resting stance is stable.
+         Mass is 10 g apiece, negligible against a ~1.5 kg airframe, but declared explicitly
+         because a link with no <inertial> defaults to 1 kg in Gazebo, which would silently add
+         4 kg here.
+
+         These also make rest height PHYSICAL rather than a hand-tuned number: vehicle
+         .belly_clearance in mission_config.yaml exists to lift the spawn clear of the pad, and
+         it should be kept >= the foot depth (0.190) plus a margin.
+         ================================================================================ -->
+    <link name="leg_0">
+      <pose>0.13 0.22 -0.1000 0 0 0</pose>
+      <inertial>
+        <mass>0.01</mass>
+        <inertia>
+          <ixx>1.0e-6</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>1.0e-6</iyy><iyz>0</iyz><izz>1.0e-6</izz>
+        </inertia>
+      </inertial>
+      <collision name="leg_0_collision">
+        <geometry>
+          <cylinder>
+            <radius>0.012</radius>
+            <length>0.200</length>
+          </cylinder>
+        </geometry>
+        <surface>
+          <friction>
+            <ode><mu>1</mu><mu2>1</mu2></ode>
+          </friction>
+          <contact>
+            <!-- PX4's own landing-gear contact values (typhoon_h480). kp 1e6 with no min_depth
+                 or max_vel let the legs sink 39 mm into the pad under the airframe's weight,
+                 which dropped the rangefinder below its 0.10 m floor and cost a crash. -->
+            <ode>
+              <kp>1e+8</kp>
+              <kd>1</kd>
+              <max_vel>0.01</max_vel>
+              <min_depth>0.001</min_depth>
+            </ode>
+          </contact>
+        </surface>
+      </collision>
+      <visual name="leg_0_visual">
+        <geometry>
+          <cylinder>
+            <radius>0.012</radius>
+            <length>0.200</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/DarkGrey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="leg_0_joint" type="fixed">
+      <parent>iris::base_link</parent>
+      <child>leg_0</child>
+    </joint>
+
+    <link name="leg_1">
+      <pose>0.13 -0.22 -0.1000 0 0 0</pose>
+      <inertial>
+        <mass>0.01</mass>
+        <inertia>
+          <ixx>1.0e-6</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>1.0e-6</iyy><iyz>0</iyz><izz>1.0e-6</izz>
+        </inertia>
+      </inertial>
+      <collision name="leg_1_collision">
+        <geometry>
+          <cylinder>
+            <radius>0.012</radius>
+            <length>0.200</length>
+          </cylinder>
+        </geometry>
+        <surface>
+          <friction>
+            <ode><mu>1</mu><mu2>1</mu2></ode>
+          </friction>
+          <contact>
+            <!-- PX4's own landing-gear contact values (typhoon_h480). kp 1e6 with no min_depth
+                 or max_vel let the legs sink 39 mm into the pad under the airframe's weight,
+                 which dropped the rangefinder below its 0.10 m floor and cost a crash. -->
+            <ode>
+              <kp>1e+8</kp>
+              <kd>1</kd>
+              <max_vel>0.01</max_vel>
+              <min_depth>0.001</min_depth>
+            </ode>
+          </contact>
+        </surface>
+      </collision>
+      <visual name="leg_1_visual">
+        <geometry>
+          <cylinder>
+            <radius>0.012</radius>
+            <length>0.200</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/DarkGrey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="leg_1_joint" type="fixed">
+      <parent>iris::base_link</parent>
+      <child>leg_1</child>
+    </joint>
+
+    <link name="leg_2">
+      <pose>-0.13 0.20 -0.1000 0 0 0</pose>
+      <inertial>
+        <mass>0.01</mass>
+        <inertia>
+          <ixx>1.0e-6</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>1.0e-6</iyy><iyz>0</iyz><izz>1.0e-6</izz>
+        </inertia>
+      </inertial>
+      <collision name="leg_2_collision">
+        <geometry>
+          <cylinder>
+            <radius>0.012</radius>
+            <length>0.200</length>
+          </cylinder>
+        </geometry>
+        <surface>
+          <friction>
+            <ode><mu>1</mu><mu2>1</mu2></ode>
+          </friction>
+          <contact>
+            <!-- PX4's own landing-gear contact values (typhoon_h480). kp 1e6 with no min_depth
+                 or max_vel let the legs sink 39 mm into the pad under the airframe's weight,
+                 which dropped the rangefinder below its 0.10 m floor and cost a crash. -->
+            <ode>
+              <kp>1e+8</kp>
+              <kd>1</kd>
+              <max_vel>0.01</max_vel>
+              <min_depth>0.001</min_depth>
+            </ode>
+          </contact>
+        </surface>
+      </collision>
+      <visual name="leg_2_visual">
+        <geometry>
+          <cylinder>
+            <radius>0.012</radius>
+            <length>0.200</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/DarkGrey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="leg_2_joint" type="fixed">
+      <parent>iris::base_link</parent>
+      <child>leg_2</child>
+    </joint>
+
+    <link name="leg_3">
+      <pose>-0.13 -0.20 -0.1000 0 0 0</pose>
+      <inertial>
+        <mass>0.01</mass>
+        <inertia>
+          <ixx>1.0e-6</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>1.0e-6</iyy><iyz>0</iyz><izz>1.0e-6</izz>
+        </inertia>
+      </inertial>
+      <collision name="leg_3_collision">
+        <geometry>
+          <cylinder>
+            <radius>0.012</radius>
+            <length>0.200</length>
+          </cylinder>
+        </geometry>
+        <surface>
+          <friction>
+            <ode><mu>1</mu><mu2>1</mu2></ode>
+          </friction>
+          <contact>
+            <!-- PX4's own landing-gear contact values (typhoon_h480). kp 1e6 with no min_depth
+                 or max_vel let the legs sink 39 mm into the pad under the airframe's weight,
+                 which dropped the rangefinder below its 0.10 m floor and cost a crash. -->
+            <ode>
+              <kp>1e+8</kp>
+              <kd>1</kd>
+              <max_vel>0.01</max_vel>
+              <min_depth>0.001</min_depth>
+            </ode>
+          </contact>
+        </surface>
+      </collision>
+      <visual name="leg_3_visual">
+        <geometry>
+          <cylinder>
+            <radius>0.012</radius>
+            <length>0.200</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/DarkGrey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="leg_3_joint" type="fixed">
+      <parent>iris::base_link</parent>
+      <child>leg_3</child>
+    </joint>
+
+    <!-- ================================================================================
+         SIYI A8 mini forward camera.
+
+         Mandatory for the mission, not optional: the NIDAR rules require a live camera feed
+         to the GCS throughout the flight and survivor detection by onboard sensing, neither
+         of which a LiDAR can satisfy.
+
+         The sensor block models the REAL A8 mini's optics, deliberately downscaled for sim
+         CPU cost (the stock fpv_cam.sdf carries its own warning that camera sensors are
+         expensive here, and this machine is already CPU/RAM bound):
+             horizontal_fov 1.4137 rad = 81 deg   (real unit: 93 deg diagonal / 81 deg horizontal)
+             640x480 @ 15 fps                     (real unit: 1080p30 / 4K25)
+         Values come from nidar/camera in mission_config.yaml.
+
+         The <visual> mesh is the supplied A8_mini_Camera.stl, converted from ASCII to binary
+         STL (16.4 MB -> 2.56 MB, identical 51176 triangles) because Gazebo parses the mesh on
+         every spawn. It is ALREADY IN METRES (0.052 x 0.061 x 0.084 m against a real
+         55 x 55 x 70 mm body), so scale is 1.0 - scaling it by 0.001 as if it were millimetres
+         would shrink it to invisibility.
+
+         Collision is a small primitive box, NOT the mesh: a 51k-triangle collision body would
+         be enormously expensive and buys nothing, since the camera sits inside the airframe's
+         own footprint (the Iris collision radius of 0.384 m already dominates).
+
+         Mounted forward and slightly below the CoM with a fixed -15 deg pitch, standing in for
+         a gimbal pointed forward-down. Full 3-axis articulation (revolute joints driven by
+         libgazebo_gimbal_controller_plugin.so, as in typhoon_h480) is a later refinement.
+         ================================================================================ -->
+    <link name="camera_link">
+      <!-- Mounted UNDER the airframe, INVERTED (roll = pi) so the mesh's other face mates
+           with the belly, the original (roll=0) mount put the housing's small end down and
+           the bulk of the body pressed up against the fuselage instead of hanging clear below
+           it, which read as "wrong way up" / not properly connected to the lower body.
+
+           Computed from the actual siyi_a8_mini.stl vertices under the SDF's real rotation
+           order (v' = Ry(pitch) @ Rx(roll) @ v, roll applied first): with roll=pi and pitch
+           left at +0.2617994 (unchanged), the forward vector is EXACTLY preserved at
+           (0.966, 0, -0.259), still forward-and-down, because a roll about local X cannot
+           change a vector that already lies on X. Only the z-extent of the mesh flips: it goes
+           from (-0.0152 .. +0.0756) at roll=0 to (-0.0729 .. +0.0156) at roll=pi.
+
+           iris base_link collision bottom is z = -0.055 (0.47 x 0.47 x 0.11 box, centred), so
+           seating the new top face (+0.0156) against it gives
+               link z = -0.055 - 0.0156 = -0.0706
+           and the housing/lens end now hangs to z = -0.0706 + (-0.0729) = -0.1435.
+
+           Re-derive both numbers with scripts/check_mount_geometry.py (or by rotating the STL
+           vertices directly) before changing roll or pitch again, a naive bbox-corner flip
+           gives the wrong answer here because pitch and roll do not commute. -->
+      <pose>0.05 0 -0.0706 3.1415927 0.2617994 -3.1415927</pose>
+      <inertial>
+        <mass>0.095</mass>
+        <inertia>
+          <ixx>6.5e-05</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>6.5e-05</iyy>
+          <iyz>0</iyz>
+          <izz>4.8e-05</izz>
+        </inertia>
+      </inertial>
+
+      <collision name="camera_collision">
+        <geometry>
+          <box>
+            <size>0.055 0.055 0.070</size>
+          </box>
+        </geometry>
+      </collision>
+
+      <visual name="camera_visual">
+        <geometry>
+          <mesh>
+            <uri>model://iris_vlp16_cam/meshes/siyi_a8_mini.stl</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/DarkGrey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+
+      <sensor name="camera" type="camera">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>1</always_on>
+        <update_rate>15</update_rate>
+        <visualize>false</visualize>
+        <camera name="a8_mini">
+          <horizontal_fov>1.4137</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.05</near>
+            <far>100</far>
+          </clip>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.007</stddev>
+          </noise>
+        </camera>
+        <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+          <alwaysOn>true</alwaysOn>
+          <updateRate>15</updateRate>
+          <cameraName>camera</cameraName>
+          <imageTopicName>image_raw</imageTopicName>
+          <cameraInfoTopicName>camera_info</cameraInfoTopicName>
+          <frameName>camera_link</frameName>
+          <hackBaseline>0.0</hackBaseline>
+          <distortionK1>0.0</distortionK1>
+          <distortionK2>0.0</distortionK2>
+          <distortionK3>0.0</distortionK3>
+          <distortionT1>0.0</distortionT1>
+          <distortionT2>0.0</distortionT2>
+        </plugin>
+      </sensor>
+    </link>
+
+    <joint name="camera_joint" type="fixed">
+      <parent>iris::base_link</parent>
+      <child>camera_link</child>
+    </joint>
+
+  </model>
+</sdf>

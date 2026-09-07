@@ -1,0 +1,49 @@
+<?xml version="1.0" ?>
+<sdf version="1.5">
+  <model name="arina_nidar">
+    <static>true</static>
+    <link name="link">
+      <!-- The source mesh (simulation/ARINA_NIDAR.STL) is authored in MILLIMETRES with its
+           minimum corner at the origin: raw extents are 15000 x 15000 x 2540 mm. Gazebo reads STL
+           vertices as metres, so it needs <scale>0.001</scale> or it would spawn as a 15 km
+           structure. The -7.5 -7.5 offset then re-centres the 15 x 15 m footprint on the world
+           origin, matching the convention the flight envelope guard and the FUEL box already use
+           (world +/-7.0 arena, +/-6.8 effective envelope).
+           Measured after placement: walls 2.54 m tall, 606 wall segments at the 1.4 m cruise
+           slice, 301.9 m of interior wall, 158.0 m2 of free floor.
+           ENTRANCE: a single 1.90 m opening in the south wall (y = -7.5) spanning
+           x = -0.95 .. +0.95, centred on x = 0. The launch pad is placed due south of it. -->
+      <pose>-7.5 -7.5 0 0 0 0</pose>
+      <collision name="collision">
+        <geometry>
+          <mesh>
+            <uri>model://arina_nidar/meshes/arina_nidar.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+        <surface>
+          <!-- Explicit 1.0/1.0, matching ODE's own default and the vehicle's own surfaces. The
+               previous arena shipped with mu=100/mu2=50, which made the vehicle plant itself on
+               contact instead of sliding free and cost several sessions of debugging. Keep this
+               block present and visible on every new arena.
+               See PLANNING_DOCS/guard_state_validation_and_wall_stuck_fix_2026-09-04.md Sec 2a. -->
+          <friction>
+            <ode>
+              <mu>1.0</mu>
+              <mu2>1.0</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+      <visual name="visual">
+        <cast_shadows>false</cast_shadows>
+        <geometry>
+          <mesh>
+            <uri>model://arina_nidar/meshes/arina_nidar.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+  </model>
+</sdf>

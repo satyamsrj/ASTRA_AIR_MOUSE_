@@ -175,17 +175,29 @@ double g_range_timeout = 1.0;
 double g_range_min = 0.10;
 double g_range_max = 12.0;
 
-// Vertical offset from the vehicle reference point (iris::base_link) DOWN to the TFmini's beam
-// origin, in metres: the sensor sits this far below the point whose altitude the rest of the stack
-// talks about. Matches the <pose>0 0 -0.05</pose> the tfmini_lidar model is mounted at in
-// simulation/PX4-Autopilot-v1.14.3/Tools/simulation/gazebo-classic/sitl_gazebo-classic/models/
-// iris_vlp16/iris_vlp16.sdf. Overridable via the param below so it can be corrected without a
-// rebuild.
-// NEEDS EMPIRICAL CHECK ON FIRST TEST: compare /tfmini/range against
-// `rosservice call /gazebo/get_model_state "model_name: 'iris_vlp16'"` at a steady hover and
-// confirm the converted value below matches ground-truth Z. A systematic error here matters:
-// the guard's effective Z band is only ~4cm wide.
-double g_tfmini_mount_offset = 0.05;
+// THE TWO CONSTANTS BELOW DEFINE THE ALTITUDE DATUM FOR THE WHOLE STACK. Get either wrong and
+// every consumer of /Fast_LIO/odometry silently flies to the wrong height. Both are params, and
+// both are generated from mission_config.yaml -- do not hardcode either again.
+//
+// Vertical offset from base_link DOWN to the TFmini's beam origin, metres. Must equal the
+// tfmini_lidar mount pose in the vehicle SDF, and PX4's EKF2_RNG_POS_Z in the airframe file.
+// Default is the X500 value; 0.05 was the iris's.
+double g_tfmini_mount_offset = 0.0573;
+
+// World height of the camera_init origin, metres: FAST-LIO plants camera_init wherever base_link
+// sits when it initialises, i.e. the spawn height (pad thickness + belly clearance). This is the
+// SAME number flight_envelope_guard.py reads as spawn_world_z, and the same one the world->map
+// static TF carries -- all three must agree or they describe different frames while claiming to
+// share one. Default is the X500 value; 0.1 was the iris's (pad 0.03 + belly 0.07).
+//
+// This was hardcoded as a literal 0.1 until 2026-09-06, and the airframe migration moved the
+// vehicle to 0.26 without it. Measured consequence, from the run that day: the published Z ran
+// 0.15 m high, FUEL's start_pt landed ABOVE its own map ceiling (box_max_z 1.44) on 99.2% of
+// replans, the kinodynamic search could not expand a single node from an out-of-box start, and
+// 10314 of 10388 plan attempts failed -- which the vehicle showed as hovering in place for up to
+// 125 s at a time between short bursts of motion. It also put PX4 in a fight with itself, since
+// EKF2 fuses this Z as vision VPOS alongside the same rangefinder it is derived from.
+double g_camera_init_world_z = 0.26;
 
 void rangeCb(const sensor_msgs::Range::ConstPtr& msg)
 {
@@ -201,9 +213,11 @@ void rangeCb(const sensor_msgs::Range::ConstPtr& msg)
     }
 
     // TFmini measures sensor-to-floor distance. Convert to base_link altitude by adding the mount
-    // offset, then to camera_init using the same rigid transform flight_envelope_guard.py uses
-    // (zw = zc + 0.1), inverted:  zc = zw - 0.1 = (range + mount_offset) - 0.1
-    g_pinned_height_camera_init = msg->range + g_tfmini_mount_offset - 0.1;
+    // offset, then to camera_init with the same rigid transform flight_envelope_guard.py uses
+    // (zw = zc + spawn_world_z), inverted:
+    //     zc = zw - spawn_world_z = (range + mount_offset) - camera_init_world_z
+    g_pinned_height_camera_init =
+        msg->range + g_tfmini_mount_offset - g_camera_init_world_z;
     g_last_range_time = ros::Time::now().toSec();
     g_range_valid = true;
 }
@@ -678,6 +692,35 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
             g_range_valid ? "stale" : "never received",
             odomAftMapped.pose.pose.position.z);
     }
+    // VELOCITY. The ESEKF estimates this every iteration (state_point.vel, in the camera_init
+    // frame) but upstream never wrote it into the message, so twist was identically zero on
+    // every sample ever published. FUEL reads exactly this field into FastExplorationFSM's
+    // odom_vel_ and uses it for two things, both of which silently degraded:
+    //
+    //   1. start_vel_ for the kinodynamic replan whenever the FSM is in static_state_ (after a
+    //      NO_FRONTIER or FAIL) or falls back on the >1 m tracking-error branch. Measured
+    //      2026-09-06: 14% of replans took one of those branches, so 14% of trajectories were
+    //      planned as if the vehicle were HOVERING while it was actually doing ~0.58 m/s. Each
+    //      one commands a decelerate-to-zero followed by a re-accelerate -- visible as the
+    //      vehicle stopping dead and then setting off again.
+    //   2. ViewNode::computeCost's direction penalty, w_dir_ * angle(velocity, bearing to the
+    //      candidate). With w_dir_ = 1.5 that is worth up to 4.71 s, but the whole term is
+    //      guarded by `if (v1.norm() > 1e-3)`, so with a zero twist it never applied at all --
+    //      and applied at full strength on the replans that used a trajectory-derived velocity
+    //      instead. A cost term that switches on and off between cycles reorders the frontier
+    //      tour, and the anti-thrash margin defending the committed target is only 1.0 s.
+    //
+    // Odometry.twist is defined in child_frame_id, which is "body" here, so the world-frame
+    // state velocity is rotated into the body frame to match the message contract. FUEL rotates
+    // it back using the pose orientation; see FastExplorationFSM::odometryCallback.
+    {
+        const Eigen::Quaterniond q_wb(geoQuat.w, geoQuat.x, geoQuat.y, geoQuat.z);
+        const Eigen::Vector3d v_body = q_wb.conjugate() * Eigen::Vector3d(
+            state_point.vel(0), state_point.vel(1), state_point.vel(2));
+        odomAftMapped.twist.twist.linear.x = v_body(0);
+        odomAftMapped.twist.twist.linear.y = v_body(1);
+        odomAftMapped.twist.twist.linear.z = v_body(2);
+    }
     pubOdomAftMapped.publish(odomAftMapped);
     auto P = kf.get_P();
     for (int i = 0; i < 6; i ++)
@@ -877,7 +920,15 @@ int main(int argc, char** argv)
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
     nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
-    nh.param<double>("mapping/tfmini_mount_offset", g_tfmini_mount_offset, 0.05);
+    nh.param<double>("mapping/tfmini_mount_offset", g_tfmini_mount_offset, 0.0573);
+    nh.param<double>("mapping/camera_init_world_z", g_camera_init_world_z, 0.26);
+    // Print the datum once at startup. It is invisible at runtime otherwise -- the published Z
+    // looks perfectly plausible whatever these are set to, which is exactly how a 0.15 m error
+    // survived a whole airframe migration.
+    ROS_WARN("[FAST-LIO] altitude datum: z_camera_init = range + %.4f - %.4f  "
+             "(tfmini mount offset, camera_init world height). These MUST match the vehicle SDF "
+             "tfmini pose, PX4 EKF2_RNG_POS_Z, and guard spawn_world_z.",
+             g_tfmini_mount_offset, g_camera_init_world_z);
     nh.param<double>("mapping/tfmini_range_timeout", g_range_timeout, 1.0);
     nh.param<double>("mapping/tfmini_range_min", g_range_min, 0.10);
     nh.param<double>("mapping/tfmini_range_max", g_range_max, 12.0);

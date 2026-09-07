@@ -28,6 +28,9 @@ void FastPlannerManager::initPlanModules(ros::NodeHandle& nh) {
   nh.param("manager/accept_vel", pp_.accept_vel_, pp_.max_vel_ + 0.5);
   nh.param("manager/accept_acc", pp_.accept_acc_, pp_.max_acc_ + 0.5);
   nh.param("manager/max_yawdot", pp_.max_yawdot_, -1.0);
+  // End an exploration trajectory pointing along the path rather than at the frontier centroid.
+  // Correct only while the sensor is omnidirectional -- see planYawExplore().
+  nh.param("exploration/yaw_follows_path", yaw_follows_path_, true);
   nh.param("manager/dynamic_environment", pp_.dynamic_, -1);
   nh.param("manager/clearance_threshold", pp_.clearance_, -1.0);
   nh.param("manager/local_segment_length", pp_.local_traj_len_, -1.0);
@@ -818,8 +821,28 @@ void FastPlannerManager::planYawExplore(const Eigen::Vector3d& start_yaw, const 
       waypt_idx.push_back(i);
     }
   }
-  // Final state
-  Eigen::Vector3d end_yaw3d(end_yaw, 0, 0);
+  // Final state.
+  //
+  // 2026-09-05: `end_yaw` arrives as the viewpoint's avg_yaw -- the average BEARING TO THE
+  // FRONTIER CELLS (FrontierFinder::sampleViewpoints). Every trajectory therefore ends with a
+  // swing to face a frontier centroid, while the lookfwd waypoints above point along the path.
+  // The two disagree, so the vehicle flies forward and then wrenches its heading round at the
+  // end of each short segment.
+  //
+  // With an omnidirectional lidar that swing buys nothing: perception_utils/left_angle and
+  // right_angle are both PI, so countVisibleCells() returns an identical count for EVERY yaw --
+  // heading affects neither what is observed nor whether a viewpoint is accepted. Measured over
+  // a 130 s exploration window: 1668 deg of yaw travelled for 74 deg of net heading change
+  // (ratio 22.4), peak 111 deg/s, path/net displacement 5.9. That is the in-place weaving.
+  //
+  // So when the sensor is omnidirectional, end the trajectory pointing the way we are actually
+  // going. Set exploration/yaw_follows_path false for a limited-FOV sensor (e.g. a 60 deg
+  // horizontal unit), where facing the frontier genuinely determines what gets mapped.
+  double end_yaw_use = end_yaw;
+  if (yaw_follows_path_ && lookfwd && !waypts.empty()) {
+    end_yaw_use = waypts.back()(0);
+  }
+  Eigen::Vector3d end_yaw3d(end_yaw_use, 0, 0);
   calcNextYaw(last_yaw, end_yaw3d(0));
 
   // Cap rapid yaw change: each individual calcNextYaw step above is bounded to <= PI, but the
@@ -833,6 +856,25 @@ void FastPlannerManager::planYawExplore(const Eigen::Vector3d& start_yaw, const 
     ROS_WARN("Yaw change rapidly! start=%.3f end=%.3f (clamped to start +/- PI)", start_yaw3d[0],
         end_yaw3d[0]);
     end_yaw3d[0] = start_yaw3d[0] + ((end_yaw3d[0] > start_yaw3d[0]) ? M_PI : -M_PI);
+  }
+
+  // Enforce the configured yaw rate. pp_.max_yawdot_ was read in initPlanModules() and then
+  // referenced NOWHERE else in the whole fuel_planner tree, so the yaw B-spline was generated
+  // with no rate limit at all -- measured peak 111 deg/s against a configured 60. The PX4-side
+  // MC_YAWRATE_MAX then clips it, so the vehicle cannot track the trajectory it was given and
+  // lags its own yaw command.
+  // Clamping the boundary condition is the right lever: the optimizer must bridge
+  // start->end within `duration_`, so bounding the swing bounds the implied rate.
+  if (pp_.max_yawdot_ > 0.0 && local_data_.duration_ > 1e-3) {
+    const double max_swing = pp_.max_yawdot_ * local_data_.duration_;
+    const double swing = end_yaw3d[0] - start_yaw3d[0];
+    if (fabs(swing) > max_swing) {
+      ROS_WARN_THROTTLE(2.0,
+          "[yaw] swing %.0f deg over %.2f s implies %.0f deg/s > limit %.0f deg/s; clamping.",
+          swing * 180.0 / M_PI, local_data_.duration_,
+          fabs(swing) / local_data_.duration_ * 180.0 / M_PI, pp_.max_yawdot_ * 180.0 / M_PI);
+      end_yaw3d[0] = start_yaw3d[0] + ((swing > 0) ? max_swing : -max_swing);
+    }
   }
 
   yaw.block<3, 1>(seg_num, 0) = states2pts * end_yaw3d;

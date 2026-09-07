@@ -237,8 +237,6 @@ inline double SDFMap::getDistance(const Eigen::Vector3d& pos) {
 }
 
 inline void SDFMap::inflatePoint(const Eigen::Vector3i& pt, int step, vector<Eigen::Vector3i>& pts) {
-  int num = 0;
-
   /* ---------- + shape inflate ---------- */
   // for (int x = -step; x <= step; ++x)
   // {
@@ -257,11 +255,29 @@ inline void SDFMap::inflatePoint(const Eigen::Vector3i& pt, int step, vector<Eig
   //   pts[num++] = Eigen::Vector3i(pt(0), pt(1), pt(2) + z);
   // }
 
-  /* ---------- all inflate ---------- */
+  /* ---------- spherical inflate ----------
+     Was a full cube of +-step cells. A cube is the wrong shape for a multirotor: it inflates
+     by `step` along the axes but by step*sqrt(2) on a diagonal and step*sqrt(3) on a corner,
+     so the clearance actually demanded depends on which way the planner happens to be moving.
+
+     2026-09-05, measured on this arena: with obstacles_inflation 0.40 the entry corridor is
+     traversable end to end when 0.40 m is required in every direction (95.7 m2 reachable, the
+     whole arena), but sealed when 0.566 m is required (0.6 m2 -- trapped just inside the door).
+     0.566 is exactly 0.40*sqrt(2), i.e. what a cube demands of every DIAGONAL A* expansion.
+     Astar::search proposes mostly diagonal steps, so the gate was open only on the rare
+     axis-aligned expansion: 2 successful plans against 33320 failures.
+
+     A sphere makes the inflation isotropic, so the clearance requested in the config is the
+     clearance enforced, in every direction. It is also strictly less conservative than the
+     cube it replaces -- it only ever removes cells -- so it cannot make any previously safe
+     path unsafe. */
+  const int sq = step * step;
+  pts.clear();
   for (int x = -step; x <= step; ++x)
     for (int y = -step; y <= step; ++y)
       for (int z = -step; z <= step; ++z) {
-        pts[num++] = Eigen::Vector3i(pt(0) + x, pt(1) + y, pt(2) + z);
+        if (x * x + y * y + z * z > sq) continue;
+        pts.push_back(Eigen::Vector3i(pt(0) + x, pt(1) + y, pt(2) + z));
       }
 }
 }

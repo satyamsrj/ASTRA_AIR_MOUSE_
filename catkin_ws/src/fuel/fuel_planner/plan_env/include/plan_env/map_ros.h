@@ -37,6 +37,8 @@ private:
                          const geometry_msgs::PoseStampedConstPtr& pose);
   void updateESDFCallback(const ros::TimerEvent& /*event*/);
   void visCallback(const ros::TimerEvent& /*event*/);
+  // Coverage accounting: how much of the arena slab is mapped and how much is left.
+  void coverageCallback(const ros::TimerEvent& /*event*/);
 
   void publishMapAll();
   void publishMapLocal();
@@ -66,7 +68,20 @@ private:
 
   ros::Publisher map_local_pub_, map_local_inflate_pub_, esdf_pub_, map_all_pub_, unknown_pub_,
       update_range_pub_, depth_pub_;
-  ros::Timer esdf_timer_, vis_timer_;
+  ros::Timer esdf_timer_, vis_timer_, coverage_timer_;
+  // Coverage report. arena_area_m2_ is the arena's own known free area at the cruise slice,
+  // measured off the mesh and passed in as a param, so "percent explored" is a fraction of what
+  // is actually reachable rather than of the bounding box.
+  ros::Publisher coverage_pub_;
+  double arena_area_m2_;
+  double coverage_interval_;
+  int coverage_last_known_;
+  // Publish the UNKNOWN voxels of the planning box on /sdf_map/unknown, built inside the
+  // coverage sweep that already visits and classifies every one of them. Upstream's
+  // publishUnknown() is commented out (and scans only the local bound, not the box), which
+  // left /sdf_map/unknown advertised but permanently silent -- so anything reconstructing the
+  // map from topics had no way to tell unknown space from free space.
+  bool publish_unknown_;
 
   // params, depth projection
   double cx_, cy_, fx_, fy_;

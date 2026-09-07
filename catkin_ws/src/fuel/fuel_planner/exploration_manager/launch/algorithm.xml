@@ -35,7 +35,26 @@
     <param name="sdf_map/map_size_y"   value="$(arg map_size_y_)" /> 
     <param name="sdf_map/map_size_z"   value="$(arg map_size_z_)" /> 
     <!-- <param name="sdf_map/obstacles_inflation"     value="0.099" />  -->
-    <param name="sdf_map/obstacles_inflation"     value="0.199" /> 
+    <!-- was 0.199. FUEL models the vehicle as a POINT and relies entirely on this inflation to
+         represent its size, but the Iris is 0.767 m across: rotors sit at (+/-0.13, +/-0.22)
+         = 0.2555 m from centre and each rotor collision cylinder adds 0.128 m, so the true
+         collision radius is 0.384 m. At 0.199 the planner was routing the vehicle through gaps
+         roughly half its own width, so the props physically wedged against walls.
+         Measured on run 13_34_32: groundtruth held the vehicle STATIC at world (6.89, 4.70),
+         0.20 m from the nearest wall (its props 0.18 m inside that wall), for 8+ seconds
+         while the estimator believed it was still flying and drifted from 1.6 m to 4.9 m of
+         error before the run was lost. That is the "drone gets stuck on the vertical walls"
+         failure: a physical wedge, not a control or SLAM bug (the SLAM divergence follows the
+         contact, it does not cause it).
+         0.42 = 0.384 collision radius + 0.036 margin, which is about 1 sigma of the measured
+         2.6-4.0 cm position tracking jitter. This arena is the binding constraint, not the
+         value: median clearance is only 0.42 m and the widest point is 1.26 m, so connected
+         navigable area is 70.5 m2 at 0.42 vs 134.1 m2 at 0.199, but that larger figure was
+         never real: it counted gaps the airframe cannot pass. Spawn (0,-6.5) has 0.62 m and the
+         tightest point on its exit corridor 0.47 m, so egress still works.
+         Raise toward 0.45 for more margin at the cost of area (65.0 m2); do not go below 0.384
+         under any circumstances. -->
+    <param name="sdf_map/obstacles_inflation"     value="0.4" />
     <param name="sdf_map/local_bound_inflate"    value="0.5"/>
     <param name="sdf_map/local_map_margin" value="50"/>
     <param name="sdf_map/ground_height"        value="-1.0"/>
@@ -68,6 +87,23 @@
     <param name="map_ros/k_depth_scaling_factor" value="1000.0"/>
     <param name="map_ros/skip_pixel" value="2"/>
     <param name="map_ros/esdf_slice_height" value="0.3"/>
+    <!-- Coverage report. arena_area_m2 is the denominator for "percent explored": the arena's
+         own navigable free area at the cruise slice, measured off the mesh and kept in step by
+         the generator (nidar.arenas.<active>.measured.free_area_m2). Without it map_ros falls
+         back to the map bounding box, which includes the walls and everything behind them, so
+         the percentage tops out far below 100 and is useless as a progress signal.
+         These MUST live here, not on traj_server: MapROS is owned by exploration_node, and a
+         param set on the wrong node is silently ignored (measured: the report fell back to the
+         191.8 m2 bounding box instead of the 158.0 m2 arena). -->
+    <param name="map_ros/arena_area_m2" value="158.0" type="double"/>
+    <!-- Publish the box's UNKNOWN voxels on /sdf_map/unknown, assembled inside the coverage
+         sweep that already classifies them. Upstream leaves publishUnknown() commented out, so
+         without this the topic is advertised but silent and nothing downstream can distinguish
+         unknown space from free space when reconstructing the map; a recorded grid then
+         reports every unmapped cell as mapped. roscpp does not serialise a message with no
+         subscribers, so this is free unless something is actually recording. -->
+    <param name="map_ros/publish_unknown" value="true" type="bool"/>
+    <param name="map_ros/coverage_interval" value="2.0" type="double"/>
     <param name="map_ros/visualization_truncate_height"   value="10.09"/>
     <param name="map_ros/visualization_truncate_low"   value="-2.0"/>
     <param name="map_ros/show_occ_time"  value="false"/>
@@ -85,6 +121,15 @@
     <!-- <param name="fsm/thresh_replan3" value="0.1" type="double"/> -->
     <param name="fsm/replan_time" value="0.200" type="double"/>
 
+    <!-- FINISH-state recovery. Upstream FUEL treats FINISH as terminal, so one NO_FRONTIER
+         result ends the mission permanently. That is fatal here: the mission triggers the
+         planner the instant the vehicle crosses the arena threshold, when the interior is
+         still unmapped, so the first plan reliably finds nothing. These bound how many times
+         planning is re-attempted before exploration is accepted as genuinely complete.
+         GENERATED from nidar/planner by nidar_mission/scripts/apply_mission_config.py. -->
+    <param name="fsm/finish_recheck_interval" value="2.0" type="double"/>
+    <param name="fsm/finish_recheck_max" value="15" type="int"/>
+
     <!-- Exploration manager -->
 
     <param name="exploration/refine_local" value="true" type="bool"/>
@@ -99,6 +144,35 @@
     <param name="exploration/w_dir" value="1.5" type="double"/>
     <param name="exploration/tsp_dir" value="$(find lkh_tsp_solver)/resource" type="string"/>
     <param name="exploration/relax_time" value="1.0" type="double"/>
+
+    <!-- Target hysteresis. Without this the planner re-derives its next viewpoint from
+         scratch every replan (~0.2-1.5 s) and takes whatever is cheapest at that instant;
+         with several near-tied frontiers the commanded target flipped on 12 of 12
+         consecutive 5 s telemetry samples (mean 99 deg of yaw per flip), which is what
+         produced the visible ~5 s-period cruise oscillation.
+         switch_margin is in SECONDS of ViewNode::computeCost, which is
+         max(path_len/max_vel, yaw_diff/yaw_rate); at max_vel=0.6 and yd=60 deg/s the 1.0
+         default means a challenger must save >0.6 m of flight or >60 deg of turning before
+         the vehicle abandons the target it is already flying to. Set to 0.0 to restore
+         upstream stateless behaviour.
+         reached_dist releases the hold on arrival; match_dist releases it when no active
+         viewpoint remains near the held target (its frontier got cleared).
+         See PLANNING_DOCS/fuel_repeat_scan_root_cause_2026-09-04.md Sec 6.3. -->
+    <!-- Consecutive "No path to next viewpoint" failures tolerated before the committed
+         target is released. 1 (upstream behaviour) let 1141 transient A* misses disarm the
+         anti-thrash hold in a single flight, so the vehicle ping-ponged between targets. -->
+    <param name="exploration/target_fail_limit" value="5" type="int"/>;
+    <!-- End exploration yaw trajectories along the flight path instead of facing the
+         frontier centroid. Valid ONLY while the sensor is omnidirectional (left/right_angle
+         = PI); set false for a limited-FOV sensor, where heading decides what gets mapped. -->
+    <param name="exploration/yaw_follows_path" value="true" type="bool"/>;
+    <!-- Yaw rate limit for the yaw B-spline. Was never set, so planner_manager defaulted it
+         to -1 and generated yaw trajectories with NO rate limit: measured peak 111 deg/s
+         against a 60 deg/s airframe limit. -->
+    <param name="manager/max_yawdot" value="$(eval 60 * 3.1415926 / 180.0)" type="double"/>;
+    <param name="exploration/target_switch_margin" value="3.0" type="double"/>
+    <param name="exploration/target_reached_dist" value="0.4" type="double"/>
+    <param name="exploration/target_match_dist" value="3.5" type="double"/>
 
     <param name="frontier/cluster_min" value="30" type="int"/>
     <param name="frontier/cluster_size_xy" value="2.0" type="double"/>
@@ -123,8 +197,8 @@
          3D but doesn't chase every frontier's exact height. -->
     <!-- max kept at 1.6 (world ~1.7m), leaving 0.1m of margin below the guard's 1.8m effective
          ceiling so trajectory overshoot around the clamped viewpoint doesn't trigger rejects. -->
-    <param name="frontier/min_candidate_z" value="1.35" type="double"/>
-    <param name="frontier/max_candidate_z" value="1.45" type="double"/>
+    <param name="frontier/min_candidate_z" value="1.19" type="double"/>
+    <param name="frontier/max_candidate_z" value="1.29" type="double"/>
     <param name="frontier/down_sample" value="3" type="int"/>;
     <!-- was 10. min_visib_num is compared against countVisibleCells(), which iterates
          frontier.filtered_cells_ - the cluster AFTER voxel-grid downsampling at
@@ -219,8 +293,17 @@
          Starting weight, not yet empirically tuned; set to 0.0 to disable without
          reverting the rest of the plan if it destabilizes the optimizer. -->
     <param name="optimization/ld_alt" value="5.0" type="double"/>
-    <param name="optimization/z_cruise" value="1.4" type="double"/>
-    <param name="optimization/dist0" value="0.7" type="double"/>
+    <param name="optimization/z_cruise" value="1.24" type="double"/>
+    <!-- was 0.7. This is the soft ESDF repulsion distance: every control point closer than dist0
+         to an obstacle is penalised, with weight ld_dist=10.0. The arena's median clearance is
+         0.42 m and its widest point is 1.26 m, so at 0.7 essentially EVERY point of EVERY
+         trajectory sat inside the penalty band and the distance gradient fought the smoothness
+         and endpoint terms continuously instead of only near real hazards: a second, softer
+         contributor to the cruise oscillation alongside the target churn fixed above.
+         0.5 keeps a genuine repulsion margin beyond the 0.42 hard inflation while being
+         achievable in the parts of this arena the vehicle can actually occupy. Paired with the
+         obstacles_inflation change above; revert both together if reverting either. -->
+    <param name="optimization/dist0" value="0.5" type="double"/>
     <param name="optimization/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="optimization/max_acc" value="$(arg max_acc)" type="double"/>
     <param name="optimization/algorithm1" value="15" type="int"/>
