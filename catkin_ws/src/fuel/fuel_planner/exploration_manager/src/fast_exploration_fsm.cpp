@@ -249,6 +249,9 @@ void FastExplorationFSM::FSMCallback(const ros::TimerEvent& e) {
       }
       // Replan if next frontier to be visited is covered
       if (t_cur > fp_->replan_thresh2_ && expl_manager_->frontier_finder_->isFrontierCovered()) {
+        // This is the authoritative "exploration actually advanced" signal, so it is what the
+        // global stall clock keys off.
+        expl_manager_->ed_->last_progress_time_ = ros::Time::now();
         transitState(PLAN_TRAJ, "FSM");
         ROS_WARN("Replan: cluster covered=====================================");
         return;

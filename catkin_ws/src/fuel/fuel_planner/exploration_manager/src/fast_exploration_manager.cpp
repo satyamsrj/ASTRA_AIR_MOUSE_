@@ -53,8 +53,12 @@ void FastExplorationManager::initialize(ros::NodeHandle& nh) {
   nh.param("exploration/relax_time", ep_->relax_time_, 1.0);
   nh.param("exploration/target_switch_margin", ep_->target_switch_margin_, 1.0);
   nh.param("exploration/target_fail_limit", ep_->target_fail_limit_, 5);
+  nh.param("exploration/target_fail_min_seconds", ep_->target_fail_min_seconds_, 3.0);
   nh.param("exploration/target_reached_dist", ep_->target_reached_dist_, 0.4);
   nh.param("exploration/target_match_dist", ep_->target_match_dist_, 2.0);
+  nh.param("exploration/target_stale_seconds", ep_->target_stale_seconds_, 20.0);
+  nh.param("exploration/target_progress_eps", ep_->target_progress_eps_, 0.15);
+  nh.param("exploration/global_stale_seconds", ep_->global_stale_seconds_, 40.0);
   ed_->has_last_target_ = false;
 
   nh.param("exploration/vm", ViewNode::vm_, -1.0);
@@ -249,13 +253,17 @@ int FastExplorationManager::planExploreMotion(
   if (ep_->target_switch_margin_ > 0.0 && ed_->has_last_target_) {
     const bool reached = (ed_->last_next_pos_ - pos).norm() < ep_->target_reached_dist_;
 
-    bool still_active = false;
-    for (const auto& p : ed_->points_) {
-      if ((p - ed_->last_next_pos_).norm() < ep_->target_match_dist_) {
-        still_active = true;
-        break;
-      }
-    }
+    // Ask the frontier finder about EVERY sampled viewpoint, not ed_->points_. points_ holds
+    // only the best-ranked viewpoint per frontier and getTopViewpointsInfo() re-picks those
+    // relative to the CURRENT position, so they slide as the vehicle flies. Scanning that list
+    // made a still-valid committed target look inactive once the vehicle had moved far enough
+    // for every representative to drift past target_match_dist_, releasing the hold and
+    // freeing the planner to switch -- which moved the vehicle further and released it again.
+    // Measured 2026-09-07: from t=150 s the vehicle never again closed within 2.1 m of its
+    // commanded target (median gap 7-8.6 m) while A* was still returning paths (only 11
+    // no-path failures), churn 12.1, and coverage sat at 52.7% for 168 s.
+    const bool still_active =
+        frontier_finder_->hasViewpointNear(ed_->last_next_pos_, ep_->target_match_dist_);
 
     if (!reached && still_active) {
       vector<Vector3d> tmp_path;
@@ -271,6 +279,60 @@ int FastExplorationManager::planExploreMotion(
       }
     }
   }
+  // ---- progress watchdog on the held target -------------------------------------------
+  // The failure this catches is NOT a planning failure: A* returns a path every cycle, the
+  // trajectory executes, and the vehicle flies -- it just never gets close enough to the
+  // viewpoint to observe the frontier, so the cluster is never covered, never cleared, and the
+  // planner re-selects it forever. Retirement therefore has to key off closing progress rather
+  // than off no-path, which is what target_fail_streak_ already covers.
+  //
+  // A real traverse shrinks the distance every cycle, so its timer resets continuously and it
+  // can run as long as it likes; only a target the vehicle cannot actually reach lets the clock
+  // expire. Measured 20260907_213348: the target sat fixed for 220 s while the gap oscillated
+  // 0.26-1.85 m and never improved.
+  {
+    const double dist_now = (next_pos - pos).norm();
+    const bool same_target = ed_->has_last_target_ &&
+        (next_pos - ed_->last_next_pos_).norm() < ep_->target_match_dist_;
+
+    if (!same_target) {
+      ed_->target_best_dist_ = dist_now;
+      ed_->target_progress_time_ = ros::Time::now();
+    } else if (dist_now < ed_->target_best_dist_ - ep_->target_progress_eps_) {
+      ed_->target_best_dist_ = dist_now;
+      ed_->target_progress_time_ = ros::Time::now();
+    } else if (!ed_->target_progress_time_.isZero()) {
+      const double stale_s = (ros::Time::now() - ed_->target_progress_time_).toSec();
+      if (stale_s >= ep_->target_stale_seconds_) {
+        ROS_WARN("[FSM] target held %.1f s without closing (best %.2f m, now %.2f m); "
+                 "retiring it so the planner moves on.", stale_s, ed_->target_best_dist_,
+                 dist_now);
+        frontier_finder_->requestRetireFrontierNear(next_pos);
+        ed_->target_progress_time_ = ros::Time::now();
+        ed_->target_best_dist_ = 1e9;
+      }
+    }
+
+    // Global stall clock. The per-target test above resets whenever the planner switches to a
+    // target further than target_match_dist_ away, so a planner thrashing between several
+    // unreachable viewpoints escapes it entirely. This clock ignores target identity and asks
+    // only whether exploration advanced at all -- it is reset in the FSM when a cluster is
+    // actually covered. Whatever target is held when it expires is the one blocking progress.
+    if (ed_->last_progress_time_.isZero()) {
+      ed_->last_progress_time_ = ros::Time::now();
+    } else {
+      const double idle_s = (ros::Time::now() - ed_->last_progress_time_).toSec();
+      if (idle_s >= ep_->global_stale_seconds_) {
+        ROS_WARN("[FSM] no frontier cluster covered for %.1f s; retiring the held target (%.2f "
+                 "%.2f %.2f) and moving on.", idle_s, next_pos(0), next_pos(1), next_pos(2));
+        frontier_finder_->requestRetireFrontierNear(next_pos);
+        ed_->last_progress_time_ = ros::Time::now();
+        ed_->target_progress_time_ = ros::Time::now();
+        ed_->target_best_dist_ = 1e9;
+      }
+    }
+  }
+
   ed_->last_next_pos_ = next_pos;
   ed_->last_next_yaw_ = next_yaw;
   ed_->has_last_target_ = true;
@@ -297,9 +359,27 @@ int FastExplorationManager::planExploreMotion(
     // returns to targets already abandoned -- the vehicle ping-ponged between two attractors.
     // A* legitimately misses on one cycle and succeeds on the next while the map fills in, so
     // require a run of failures against the SAME target before giving up on it.
-    if (++ed_->target_fail_streak_ >= ep_->target_fail_limit_) {
-      ROS_WARN("[FSM] target unreachable %d cycles running; releasing the held target.",
-               ed_->target_fail_streak_);
+    if (ed_->target_fail_streak_ == 0) ed_->target_fail_streak_start_ = ros::Time::now();
+    ++ed_->target_fail_streak_;
+    const double streak_s = (ros::Time::now() - ed_->target_fail_streak_start_).toSec();
+    if (ed_->target_fail_streak_ >= ep_->target_fail_limit_ &&
+        streak_s >= ep_->target_fail_min_seconds_) {
+      ROS_WARN("[FSM] target unreachable %d cycles over %.1f s; releasing the held target.",
+               ed_->target_fail_streak_, streak_s);
+      // Releasing the hold alone does not stop this: nothing removed the frontier from
+      // frontiers_, so the very next ATSP cycle costs and re-picks the same viewpoint and A*
+      // fails again -- measured 2026-09-07: one such frontier was targeted, abandoned by the
+      // hysteresis-fail path above, and re-targeted in 52 separate episodes across a single
+      // 1300 s run, most of it spent oscillating in place while coverage stalled at 91.2%.
+      // Retiring the cluster to dormant here is what actually stops the loop; the existing
+      // dormant re-check on map change resurrects it if it later becomes reachable.
+      // Gated on the run of failures spanning target_fail_min_seconds_ of real time, not on
+      // the cycle count alone. Replanning runs at tens of hertz, so a count-only test is met
+      // in milliseconds whenever the vehicle simply cannot fly -- and a vehicle that cannot
+      // fly fails A* to EVERY frontier at once, which retires the whole list and reports the
+      // mission finished. Requiring the failures to persist over seconds keeps retirement a
+      // statement about the frontier rather than about the airframe.
+      frontier_finder_->requestRetireFrontierNear(next_pos);
       ed_->has_last_target_ = false;
       ed_->target_fail_streak_ = 0;
     }

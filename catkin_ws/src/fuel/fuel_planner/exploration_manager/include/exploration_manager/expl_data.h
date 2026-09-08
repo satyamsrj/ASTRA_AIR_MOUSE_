@@ -65,6 +65,28 @@ struct ExplorationData {
   // can miss on one cycle and succeed on the next -- so the hold is only dropped after a run
   // of them. See the no-path branch in planExploreMotion().
   int target_fail_streak_ = 0;
+  // When the CURRENT run of consecutive A* failures began. Retirement needs a run of failures
+  // that is long in TIME as well as in count: replanning spins at tens of hertz, so a count
+  // alone is satisfied in milliseconds by a vehicle that cannot fly at all, which is not
+  // evidence about any frontier. See target_fail_min_seconds_.
+  ros::Time target_fail_streak_start_;
+
+  // Progress watchdog for a held target. target_fail_streak_ counts only PLANNING failures, so
+  // it is structurally blind to the deadlock where A* keeps returning paths but the vehicle
+  // never actually closes on the viewpoint -- so the frontier is never observed, never cleared,
+  // and never retired. Measured 20260907_213348: 861 successful plans and 3 failure-streaks
+  // across a 755 s stall in which coverage moved 0.1 m2, the vehicle flew 485 m for 14.6 m of
+  // net displacement, and "cluster covered" fired 57 times before the stall and exactly 0 after.
+  // Reproduced 20260908_090811. These track the closest approach achieved to the held target
+  // and when that best distance last improved.
+  ros::Time target_progress_time_;
+  // Global exploration-progress clock, reset only when a frontier cluster is actually covered.
+  // The per-target timer above is defeated by target thrashing: measured 20260908_091850, the
+  // planner alternated between viewpoints 3.8-5.5 m apart, so every switch exceeded
+  // target_match_dist_ and reset the per-target clock while coverage sat at 114.7 m2 for 90 s.
+  // Progress, not target identity, is the thing worth timing.
+  ros::Time last_progress_time_;
+  double target_best_dist_ = 1e9;
 
   // viewpoint planning
   // vector<Vector4d> views_;
@@ -89,8 +111,27 @@ struct ExplorationParam {
   double target_switch_margin_;
   // Consecutive no-path failures tolerated against a held target before it is released.
   int target_fail_limit_;
+  // Minimum WALL/SIM seconds the failure run must span before a frontier may be retired.
+  // Counting cycles alone cannot distinguish "this viewpoint is genuinely unreachable" from
+  // "the vehicle is currently incapable of flying anywhere". Measured 2026-09-07 run
+  // 20260907_162205: the vehicle lost attitude control at t=266 s and struck the floor at
+  // t=269.8 s; every remaining target then failed A* at once and 19 frontiers were retired
+  // inside 0.9 s (against ONE retirement in the whole preceding 205 s of healthy flight).
+  // That emptied frontiers_, tripped NO_FRONTIER, and published /exploration_completed at
+  // t=270.9 s with coverage at 75.7% -- a crash reported as a finished mission.
+  double target_fail_min_seconds_;
   double target_reached_dist_;
   double target_match_dist_;
+  // Retire a held target that has gone this long without closing any further. A legitimate
+  // traverse keeps shrinking the distance every cycle, so its timer resets continuously; only a
+  // target the vehicle cannot actually reach lets the clock run out.
+  double target_stale_seconds_;
+  // How much the distance must shrink to count as progress, so estimator jitter alone cannot
+  // keep resetting the timer.
+  double target_progress_eps_;
+  // Retire the currently held target if no cluster has been covered for this long, regardless of
+  // how often the target identity changed in the meantime.
+  double global_stale_seconds_;
 };
 
 }  // namespace fast_planner

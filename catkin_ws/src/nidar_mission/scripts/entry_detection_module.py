@@ -785,11 +785,14 @@ class EntryDetectionModuleNode:
         if self.uav_pose is not None:
             ps.pose.position.x = self.uav_pose[0]
             ps.pose.position.y = self.uav_pose[1]
-            ps.pose.position.z = self.takeoff_height
+            # camera_init frame (set on p.header above), so the camera_init cruise altitude
+            # belongs here -- takeoff_height is world AGL and would ask FUEL to explore 0.26 m
+            # higher than the configured cruise height.
+            ps.pose.position.z = self.cruise_z_camera_init
         else:
             ps.pose.position.x = 0.0
             ps.pose.position.y = 0.0
-            ps.pose.position.z = 1.5
+            ps.pose.position.z = self.cruise_z_camera_init
 
         ps.pose.orientation.w = 1.0
         p.poses.append(ps)
@@ -967,14 +970,24 @@ class EntryDetectionModuleNode:
             # Height gained since the pad, not absolute height: immune to wherever EKF2
             # happens to plant its height origin.
             climb = self.uav_pose[2] - (self.pad_z if self.pad_z is not None else 0.0)
-            if climb >= (self.takeoff_height - 0.20) and not self._pose_settled():
+            # Compare against the CAMERA_INIT cruise altitude, not takeoff_height. uav_pose
+            # comes from /mavros/local_position/pose, which this stack feeds from FAST-LIO and
+            # is therefore camera_init, whose origin sits at the spawn pose -- 0.26 m above the
+            # world floor. takeoff_height is a WORLD AGL figure (1.50), so comparing the two
+            # demanded a camera_init climb of 1.30 m from a vehicle whose commanded ceiling is
+            # camera_init 1.240. The gate could then only open on a >0.06 m overshoot, which is
+            # why entry worked on some runs and not others; once the EDM began holding the pad
+            # through the climb the overshoot largely vanished and it stopped opening at all.
+            # Measured 2026-09-07: held at camera_init z=1.24 for 7+ minutes, FUEL parked in
+            # WAIT_TRIGGER the whole time, 5.7% coverage from the pad.
+            if climb >= (self.cruise_z_camera_init - 0.20) and not self._pose_settled():
                 # EKF2's external-vision alignment resets cluster in the seconds after takeoff.
                 # Leaving the pad while they are still happening is what threw the vehicle
                 # 2.2 m off centre on 2026-09-05.
                 rospy.logwarn_throttle(2.0, "[EDM] At altitude but the estimator is still "
                                             "settling (last reset %.2f m); holding over the pad.",
                                        self.last_jump_size)
-            elif climb >= (self.takeoff_height - 0.20):
+            elif climb >= (self.cruise_z_camera_init - 0.20):
                 rospy.loginfo("[EDM] Takeoff height reached (%.2f m above the pad). "
                               "Transitioning to ENTRY_SEARCH.", climb)
                 self.entry_yaw = self.uav_yaw
@@ -1046,8 +1059,8 @@ class EntryDetectionModuleNode:
                 self.approach_advancing = advance
                 if not advance:
                     rospy.logwarn_throttle(
-                        3.0, "[EDM] Aligning: lateral error %.2f m > %.2f m tolerance; "
-                             "holding forward motion.", lat_err, self.align_tolerance)
+                        3.0, "[EDM] Aligning: lateral error %.2f m > %.2f m tolerance; holding forward motion.",
+                        lat_err, self.align_tolerance)
                 elif not self.approach_ready_logged:
                     self.approach_ready_logged = True
                     rospy.loginfo("[EDM] Aligned on the door centreline (lateral error "

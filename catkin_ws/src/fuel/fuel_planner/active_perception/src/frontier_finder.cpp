@@ -40,6 +40,9 @@ FrontierFinder::FrontierFinder(const EDTEnvironment::Ptr& edt, ros::NodeHandle& 
   nh.param("frontier/down_sample", down_sample_, -1);
   nh.param("frontier/min_visib_num", min_visib_num_, -1);
   nh.param("frontier/min_view_finish_fraction", min_view_finish_fraction_, -1.0);
+  nh.param("frontier/retire_min_interval", retire_min_interval_, 5.0);
+  nh.param("frontier/retire_cooldown", retire_cooldown_, 60.0);
+  last_retire_time_ = ros::Time();  // zero == "none yet", so the first retirement is free
 
   raycaster_.reset(new RayCaster);
   resolution_ = edt_env_->sdf_map_->getResolution();
@@ -73,6 +76,14 @@ void FrontierFinder::searchFrontiers() {
 
   std::cout << "Before remove: " << frontiers_.size() << std::endl;
 
+  // Does this cluster own a viewpoint that planExploreMotion gave up on reaching?
+  auto retireRequested = [this](const Frontier& ftr) {
+    for (const auto& want : pending_retire_)
+      for (const auto& vp : ftr.viewpoints_)
+        if ((vp.pos_ - want).norm() < 1e-2) return true;
+    return false;
+  };
+
   removed_ids_.clear();
   int rmv_idx = 0;
   for (auto iter = frontiers_.begin(); iter != frontiers_.end();) {
@@ -80,14 +91,32 @@ void FrontierFinder::searchFrontiers() {
         isFrontierChanged(*iter)) {
       resetFlag(iter, frontiers_);
       removed_ids_.push_back(rmv_idx);
+    } else if (retireRequested(*iter)) {
+      // Move to dormant rather than resetFlag(): dormant clusters keep their cells and
+      // frontier_flag_ so the existing dormant re-check below can resurrect them if the map
+      // later opens a route in. removed_ids_ still gets the index, because as far as the cost
+      // matrix is concerned this cluster has left frontiers_ exactly like any other removal.
+      ROS_WARN("[FrontierFinder] retiring frontier %d to dormant (unreachable).", iter->id_);
+      last_retire_time_ = ros::Time::now();
+      iter->retired_at_ = ros::Time::now();
+      dormant_frontiers_.push_back(*iter);
+      iter = frontiers_.erase(iter);
+      removed_ids_.push_back(rmv_idx);
     } else {
       ++rmv_idx;
       ++iter;
     }
   }
+  pending_retire_.clear();
   std::cout << "After remove: " << frontiers_.size() << std::endl;
   for (auto iter = dormant_frontiers_.begin(); iter != dormant_frontiers_.end();) {
-    if (haveOverlap(iter->box_min_, iter->box_max_, update_min, update_max) &&
+    // A cluster the watchdog retired stays down for retire_cooldown_ seconds. Without this the
+    // test below resurrects it immediately -- the vehicle is still next to it, so its cells are
+    // inside the update box and flickering -- and the planner re-selects the same unreachable
+    // cluster under a fresh id, which is the grind measured in 20260908_091850.
+    const bool cooling = !iter->retired_at_.isZero() &&
+        (ros::Time::now() - iter->retired_at_).toSec() < retire_cooldown_;
+    if (!cooling && haveOverlap(iter->box_min_, iter->box_max_, update_min, update_max) &&
         isFrontierChanged(*iter))
       resetFlag(iter, dormant_frontiers_);
     else
@@ -428,6 +457,41 @@ void FrontierFinder::computeFrontiersToVisit() {
   ROS_WARN_THROTTLE(2.0,
       "[FUEL DIAG] Frontiers detected: %zu | Visitable: %zu | Dormant: %zu | Total Viewpoints: %d",
       tmp_frontiers_.size() + dormant_frontiers_.size(), frontiers_.size(), dormant_frontiers_.size(), total_vp);
+}
+
+
+bool FrontierFinder::hasViewpointNear(const Vector3d& pos, const double& tol) {
+  for (const auto& ftr : frontiers_)
+    for (const auto& vp : ftr.viewpoints_)
+      if ((vp.pos_ - pos).norm() < tol) return true;
+  return false;
+}
+
+void FrontierFinder::requestRetireFrontierNear(const Vector3d& viewpoint_pos) {
+  // Second, independent guard on the same failure the caller's duration test covers, kept here
+  // so no future caller can mass-retire either. On 2026-09-07 a crashed vehicle retired 19
+  // frontiers in 0.9 s and the emptied list published /exploration_completed at 75.7% coverage.
+  // Real frontiers go unreachable gradually; refusing a second retirement within
+  // retire_min_interval_ costs a genuinely-unreachable cluster only a short delay.
+  if (!last_retire_time_.isZero() &&
+      (ros::Time::now() - last_retire_time_).toSec() < retire_min_interval_) {
+    ROS_WARN_THROTTLE(5.0,
+                      "[FrontierFinder] retirement request for (%.2f %.2f %.2f) ignored: only "
+                      "%.2f s since the last one (minimum %.1f s). A burst of retirements means "
+                      "the vehicle cannot fly, not that the frontiers are unreachable.",
+                      viewpoint_pos.x(), viewpoint_pos.y(), viewpoint_pos.z(),
+                      (ros::Time::now() - last_retire_time_).toSec(), retire_min_interval_);
+    return;
+  }
+  // Record only. See the header for why the erase cannot happen here: frontiers_ may only be
+  // shrunk by searchFrontiers(), which maintains removed_ids_ so updateFrontierCostMatrix()
+  // can keep every surviving frontier's costs_/paths_ lists the right length.
+  for (const auto& p : pending_retire_)
+    if ((p - viewpoint_pos).norm() < 1e-2) return;  // already queued
+  pending_retire_.push_back(viewpoint_pos);
+  ROS_WARN("[FrontierFinder] queued retirement of the frontier owning viewpoint "
+           "(%.2f %.2f %.2f): unreachable after repeated A* failure.",
+           viewpoint_pos.x(), viewpoint_pos.y(), viewpoint_pos.z());
 }
 
 void FrontierFinder::getTopViewpointsInfo(

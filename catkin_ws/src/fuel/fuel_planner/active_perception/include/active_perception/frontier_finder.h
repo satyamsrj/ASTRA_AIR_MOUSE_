@@ -48,6 +48,14 @@ struct Frontier {
   // Path and cost from this cluster to other clusters
   list<vector<Vector3d>> paths_;
   list<double> costs_;
+  // When the progress watchdog retired this cluster to the dormant list, or zero if it went
+  // dormant the ordinary way (no viewpoint found). The dormant re-check resurrects any cluster
+  // whose cells overlap the update box and have changed -- and the vehicle is parked right
+  // beside the cluster it just gave up on, so that fires within a cycle and the cluster comes
+  // straight back as a new id. Measured 20260908_091850: dormant oscillated 3->4->2->0 and the
+  // same frontier was retired twice. This stamp holds a watchdog-retired cluster down for
+  // retire_cooldown_ seconds so the planner actually moves on to a different one.
+  ros::Time retired_at_;
 };
 
 class FrontierFinder {
@@ -75,6 +83,28 @@ public:
 
   void setNextFrontier(const int& id);
   bool isFrontierCovered();
+  // REQUEST that the frontier owning the viewpoint nearest to viewpoint_pos be retired to the
+  // dormant list. Called after A* has failed a run of consecutive times to reach a COMMITTED
+  // target (fast_exploration_manager.cpp target_fail_streak_): the normal dormancy path in
+  // computeFrontiersToVisit only retires a cluster when NO viewpoint at all can be sampled for
+  // it, so a cluster whose viewpoint is sampled but genuinely unreachable (behind a pinch A*
+  // cannot cross) stays in frontiers_ and gets re-costed and re-targeted forever.
+  //
+  // This only RECORDS the request; the retirement itself happens at the top of the next
+  // searchFrontiers(). That indirection is mandatory, not stylistic: every Frontier carries
+  // costs_/paths_ lists holding one positional entry per OTHER frontier, and the only code that
+  // may shrink frontiers_ is searchFrontiers(), because it records each removal's index in
+  // removed_ids_ for updateFrontierCostMatrix() to purge the matching entry everywhere else.
+  // Erasing from frontiers_ directly leaves those lists one element too long and the next
+  // positional read runs off the end -- measured 2026-09-07: doing exactly that killed
+  // exploration_node with SIGABRT 0.2 s after the first retirement fired.
+  void requestRetireFrontierNear(const Vector3d& viewpoint_pos);
+  // Is ANY viewpoint of ANY live frontier within tol of pos? Used by the target hysteresis to
+  // ask "does my committed target still have something to see?" -- which must be answered
+  // against every sampled viewpoint, not against the one-representative-per-frontier list the
+  // caller happens to hold, because that list is re-picked relative to the vehicle's CURRENT
+  // position and therefore slides as the vehicle flies.
+  bool hasViewpointNear(const Vector3d& pos, const double& tol);
   void wrapYaw(double& yaw);
 
   shared_ptr<PerceptionUtils> percep_utils_;
@@ -112,6 +142,18 @@ private:
   // Data
   vector<char> frontier_flag_;
   list<Frontier> frontiers_, dormant_frontiers_, tmp_frontiers_;
+  // Viewpoint positions whose owning frontier is to be retired at the next searchFrontiers().
+  vector<Vector3d> pending_retire_;
+  // Retirement is rate limited. Frontiers become unreachable one at a time as the map fills
+  // in; many going unreachable at the same instant is a statement about the VEHICLE, not the
+  // map, and must not be allowed to empty the frontier list and end the mission. See
+  // retire_min_interval_.
+  ros::Time last_retire_time_;
+  double retire_min_interval_;
+  // How long a watchdog-retired cluster stays dormant before the ordinary re-check may
+  // resurrect it. Bounded rather than permanent: if the map genuinely opens a route in later,
+  // the cluster should come back.
+  double retire_cooldown_;
   vector<int> removed_ids_;
   list<Frontier>::iterator first_new_ftr_;
   Frontier next_frontier_;

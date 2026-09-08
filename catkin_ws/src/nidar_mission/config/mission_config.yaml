@@ -311,6 +311,29 @@ nidar:
     # above the Iris collision radius of 0.384 m (hubs 0.2556 m + prop 0.128 m).
     # apply_mission_config.py now refuses any value that is not a multiple of map_resolution.
     # See PLANNING_DOCS/exploration_deadlock_and_x500_migration_2026-09-05.md.
+    # 2026-09-07: raised 0.40 -> 0.45 after a wall strike ended run 20260907_162205.
+    # The planner keeps the vehicle CENTRE this far from mapped obstacles, so the margin that
+    # actually absorbs localisation error is (obstacles_inflation - vehicle.collision_radius)
+    # = 0.45 - 0.2697 = 0.180 m, up from 0.130 m.
+    #
+    # Why it matters, measured on that run: localisation held 0.056-0.089 m median for 240 s,
+    # then rose to 0.421 m median / 0.994 m max over the final 10 s while the vehicle hugged
+    # the x=-7.5 wall. That is LiDAR degeneracy: closing on a flat wall lets one plane dominate
+    # the scan and scan matching goes ill-conditioned along its normal. Prop-tip clearance went
+    # +0.020 m -> -0.263 m, body rates hit 134 deg/s on all three axes, and it fell from 1.78 m.
+    # More standoff both widens the margin and keeps that wall plane from dominating the scan.
+    #
+    # INFLATION CANNOT BE RAISED. It must be a multiple of map_resolution, because
+    # SDFMap::clearAndInflateLocalMap uses inf_step = ceil(inflation / resolution) cells, so
+    # the only settings available at resolution 0.10 are 0.40 (4 cells) and 0.50 (5 cells).
+    # Measured from the arena mesh over the planning box, 2026-09-07:
+    #     0.40 -> 91.7 m2 reachable, fully connected from the door
+    #     0.45 -> 84.8 m2 reachable, fully connected   (NOT SELECTABLE: rounds up to 0.50)
+    #     0.48 -> 0.8 m2, the arena severs into disconnected pockets
+    #     0.50 -> 0.7 m2, severed
+    # The usable margin therefore stays 0.40 - 0.2697 = 0.130 m. Wall standoff has to come
+    # from frontier.min_candidate_clearance instead, which is continuous and only governs
+    # where viewpoints may be SAMPLED, not whether the arena stays traversable.
     obstacles_inflation: 0.40
     # Soft ESDF repulsion radius. Must stay below the arena's typical clearance
     # (median 0.48 m here) or every trajectory point sits in the penalty band.

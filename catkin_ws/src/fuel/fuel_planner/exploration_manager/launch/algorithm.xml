@@ -161,7 +161,21 @@
     <!-- Consecutive "No path to next viewpoint" failures tolerated before the committed
          target is released. 1 (upstream behaviour) let 1141 transient A* misses disarm the
          anti-thrash hold in a single flight, so the vehicle ping-ponged between targets. -->
-    <param name="exploration/target_fail_limit" value="5" type="int"/>;
+    <param name="exploration/target_fail_limit" value="5" type="int"/>
+    <!-- Retirement guards. A frontier is retired only when A* has failed against it for
+         target_fail_limit cycles AND those failures span target_fail_min_seconds of real
+         time, and no two retirements may land within frontier/retire_min_interval seconds.
+         Replanning runs at tens of hertz, so a cycle count alone is met in milliseconds by a
+         vehicle that cannot fly; such a vehicle fails A* to every frontier at once. On
+         2026-09-07 that retired 19 frontiers in 0.9 s, emptied the list, and published
+         /exploration_completed at 75.7% coverage: a crash reported as a finished mission. -->
+    <param name="exploration/target_fail_min_seconds" value="3.0" type="double"/>
+    <param name="frontier/retire_min_interval" value="5.0" type="double"/>
+    <!-- A watchdog-retired cluster stays dormant this long. Without it the dormant re-check
+         resurrects the cluster within a cycle (the vehicle is still beside it, so its cells are
+         in the update box and changing) and the planner re-selects the same unreachable cluster
+         under a new id. Bounded, so a route that genuinely opens later is not lost forever. -->
+    <param name="frontier/retire_cooldown" value="60.0" type="double"/>
     <!-- End exploration yaw trajectories along the flight path instead of facing the
          frontier centroid. Valid ONLY while the sensor is omnidirectional (left/right_angle
          = PI); set false for a limited-FOV sensor, where heading decides what gets mapped. -->
@@ -173,6 +187,18 @@
     <param name="exploration/target_switch_margin" value="3.0" type="double"/>
     <param name="exploration/target_reached_dist" value="0.4" type="double"/>
     <param name="exploration/target_match_dist" value="3.5" type="double"/>
+
+    <!-- Progress watchdog. target_fail_limit above only counts A* failures, so it cannot see a
+         target the planner can path to but the vehicle never reaches: the frontier is then
+         never observed, never cleared and never retired. Measured 20260907_213348: 861
+         successful plans across a 755 s stall that moved coverage 0.1 m2. A genuine traverse
+         closes the gap every cycle and resets this timer, so only an unreachable target
+         expires it. -->
+    <param name="exploration/target_stale_seconds" value="20.0" type="double"/>
+    <param name="exploration/target_progress_eps" value="0.15" type="double"/>
+    <!-- Ignores target identity: retires whatever target is held when no cluster has been
+         covered for this long. Catches the thrashing case the per-target timer misses. -->
+    <param name="exploration/global_stale_seconds" value="40.0" type="double"/>
 
     <param name="frontier/cluster_min" value="30" type="int"/>
     <param name="frontier/cluster_size_xy" value="2.0" type="double"/>
