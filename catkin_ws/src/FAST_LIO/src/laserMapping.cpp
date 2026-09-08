@@ -184,6 +184,53 @@ double g_range_max = 12.0;
 // Default is the X500 value; 0.05 was the iris's.
 double g_tfmini_mount_offset = 0.0573;
 
+// Per-scan localisation diagnostics. Six runs on 2026-09-08 all failed the same way: the pose
+// held a stable ~0.4 m error for tens of seconds and then diverged to metres in about two,
+// after which PX4 lost xy_valid and blind-landed mid-arena. Nothing observable from OUTSIDE
+// FAST-LIO (yaw rate, speed, wall distance, altitude, "No Effective Points") separated the one
+// successful run from the failures, so this logs the filter's own view of each scan. Pure
+// observation: it computes and prints, and changes no estimate.
+bool g_liodiag_en = true;
+
+// Accelerometer-bias divergence guard. Measured 20260908_131910 with the diagnostics above:
+// the least-constrained direction was vertical (weak ~ (0,0,-1)) for the entire flight, because
+// a drone holding altitude in a walled arena sees mostly VERTICAL walls whose normals are
+// horizontal -- they pin X and Y and leave Z nearly free, and the VLP-16's +-15 deg vertical FOV
+// catches little floor or ceiling. With Z unobservable the filter cannot separate real vertical
+// acceleration from accelerometer bias, so ba absorbed the difference and grew monotonically
+// 0.0398 -> 0.4717 m/s^2 over 36 s. Velocity then ran away (0.5 -> 1.0 -> 3.0 -> 15.4 -> 31.3
+// m/s) and the horizontal error followed it to 61.7 m, ending in an fd_roll crash.
+//
+// The rangefinder that could observe Z is pinned onto the PUBLISHED odometry only (see
+// publish_odometry) and never reaches the filter state, so the pinned output looked healthy
+// while the internal state rotted. Correcting that properly means adding a range measurement
+// update to the ESEKF; this guard is the bounded stopgap: a real IMU bias is small and roughly
+// constant, so a magnitude beyond ba_max is divergence rather than estimation, and clamping it
+// keeps the runaway from reaching velocity. It bounds the CONSEQUENCE, not the cause.
+// DISABLED 20260908 after measuring it. Clamping ba made things WORSE: in run 20260908_133033
+// velocity sat at 0.3-0.7 m/s while ba grew freely, and began running away on the exact sample
+// the clamp engaged (t=145.0, ba pinned at 0.300) -- 1.5 -> 6.4 -> 21.5 -> 126.5 m/s, against
+// 31.3 m/s unclamped, and coverage fell 86.1% -> 68.4%. The bias growth is the filter's only
+// outlet for vertical acceleration it cannot observe; closing it pushes the same error into
+// velocity, which is far more damaging. Left here as a recorded negative result.
+bool   g_ba_clamp_en  = false;
+
+// Z observability aid. The diagnostics show the least-constrained direction is vertical
+// (weak ~ (0,0,+-1)) for essentially every scan: a drone holding altitude in a walled arena sees
+// mostly VERTICAL walls, whose normals are horizontal, so they pin X and Y and leave Z nearly
+// free. The rangefinder that could observe Z was applied only to the PUBLISHED odometry (see
+// publish_odometry), so the filter never saw it -- the output looked correct while the state
+// drifted, and ba absorbed the unexplained vertical acceleration.
+//
+// This feeds the same reading into the STATE, as a gentle proportional correction rather than a
+// hard set: it ADDS the missing information instead of removing the filter's outlet, which is
+// the mistake the (now disabled) ba clamp made. Guarded by the same freshness test as the
+// publish-time pin, and by a maximum correction so one bad reading cannot yank the state.
+bool   g_zpin_state_en   = true;
+double g_zpin_gain       = 0.30;   // fraction of the residual applied per scan
+double g_zpin_max_corr   = 1.00;   // m; ignore residuals larger than this
+double g_ba_max       = 0.30;   // m/s^2 (unused while disabled)
+
 // World height of the camera_init origin, metres: FAST-LIO plants camera_init wherever base_link
 // sits when it initialises, i.e. the spawn height (pad thickness + belly clearance). This is the
 // SAME number flight_envelope_guard.py reads as spawn_world_z, and the same one the world->map
@@ -842,6 +889,35 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     }
 
     res_mean_last = total_residual / effct_feat_num;
+
+    /*** Localisation diagnostics (observation only -- nothing below feeds the filter) ***/
+    if (g_liodiag_en)
+    {
+        // Geometric conditioning of this scan. Each accepted correspondence constrains motion
+        // along its plane normal, so summing n*n^T over all of them gives the information
+        // available in translation. A near-zero smallest eigenvalue means one direction is
+        // unconstrained by geometry, which is what lets the pose slide without the residual
+        // objecting -- the failure signature we cannot see from outside.
+        Eigen::Matrix3d NtN = Eigen::Matrix3d::Zero();
+        for (int i = 0; i < effct_feat_num; i++)
+        {
+            const PointType &n = corr_normvect->points[i];
+            Eigen::Vector3d nv(n.x, n.y, n.z);
+            NtN += nv * nv.transpose();
+        }
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(NtN);
+        const double e0 = es.eigenvalues()(0);   // smallest
+        const double e2 = es.eigenvalues()(2);   // largest
+        const double cond = (e0 > 1e-9) ? (e2 / e0) : -1.0;   // -1 == singular
+        // Weakest-constrained direction, in world axes: which way the pose can slide freely.
+        const Eigen::Vector3d weak = es.eigenvectors().col(0);
+        ROS_INFO("[LIODIAG] t=%.3f n_down=%d n_eff=%d frac=%.3f res=%.4f eig_min=%.3e "
+                 "eig_max=%.3e cond=%.1f weak=(%.2f,%.2f,%.2f) vel=%.3f bg=%.4f ba=%.4f",
+                 lidar_end_time, feats_down_size, effct_feat_num,
+                 feats_down_size > 0 ? double(effct_feat_num) / feats_down_size : 0.0,
+                 res_mean_last, e0, e2, cond, weak(0), weak(1), weak(2),
+                 s.vel.norm(), s.bg.norm(), s.ba.norm());
+    }
     match_time  += omp_get_wtime() - match_start;
     double solve_start_  = omp_get_wtime();
     
@@ -921,6 +997,12 @@ int main(int argc, char** argv)
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
     nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
     nh.param<double>("mapping/tfmini_mount_offset", g_tfmini_mount_offset, 0.0573);
+    nh.param<bool>("mapping/liodiag_enabled", g_liodiag_en, true);
+    nh.param<bool>("mapping/ba_clamp_enabled", g_ba_clamp_en, false);
+    nh.param<bool>("mapping/zpin_state_enabled", g_zpin_state_en, true);
+    nh.param<double>("mapping/zpin_gain", g_zpin_gain, 0.30);
+    nh.param<double>("mapping/zpin_max_correction", g_zpin_max_corr, 1.00);
+    nh.param<double>("mapping/ba_max", g_ba_max, 0.30);
     nh.param<double>("mapping/camera_init_world_z", g_camera_init_world_z, 0.26);
     // Print the datum once at startup. It is invisible at runtime otherwise -- the published Z
     // looks perfectly plausible whatever these are set to, which is exactly how a 0.15 m error
@@ -1105,6 +1187,20 @@ int main(int argc, char** argv)
             double solve_H_time = 0;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
             state_point = kf.get_x();
+            if (g_zpin_state_en && g_range_valid &&
+                (ros::Time::now().toSec() - g_last_range_time) < g_range_timeout)
+            {
+                const double dz = g_pinned_height_camera_init - state_point.pos(2);
+                if (std::fabs(dz) < g_zpin_max_corr)
+                {
+                    state_point.pos(2) += g_zpin_gain * dz;
+                    kf.change_x(state_point);
+                    state_point = kf.get_x();
+                }
+                ROS_INFO_THROTTLE(2.0, "[ZPIN] range_z=%.3f state_z=%.3f dz=%.3f ba=%.4f",
+                                  g_pinned_height_camera_init, state_point.pos(2), dz,
+                                  state_point.ba.norm());
+            }
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
             geoQuat.x = state_point.rot.coeffs()[0];
