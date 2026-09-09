@@ -49,6 +49,15 @@ void FastExplorationFSM::init(ros::NodeHandle& nh) {
   trigger_sub_ =
       nh.subscribe("/waypoint_generator/waypoints", 1, &FastExplorationFSM::triggerCallback, this);
   odom_sub_ = nh.subscribe("/odom_world", 1, &FastExplorationFSM::odometryCallback, this);
+  // The mission layer (EDM) decides the run is over on a coverage plateau, which can happen
+  // while our own frontier logic still has work queued. Without this handshake the EDM flips
+  // to RETURN and starts publishing /planning/pos_cmd while we are still publishing it too --
+  // measured on runs 20260909_082915 and 20260909_101738. On the latter the plateau fired at
+  // t=505.4 s and we did not finish until t=594.5 s: 89 s of both of us driving the topic,
+  // coverage frozen at 99.24 %, then FAST-LIO diverged at t=600 and PX4 failsafed the vehicle
+  // down 9.1 m from the pad. One publisher at a time.
+  stop_sub_ = nh.subscribe("/mission/stop_exploration", 1,
+                           &FastExplorationFSM::stopExplorationCallback, this);
 
   replan_pub_ = nh.advertise<std_msgs::Empty>("/planning/replan", 10);
   new_pub_ = nh.advertise<std_msgs::Empty>("/planning/new", 10);
@@ -60,6 +69,7 @@ void FastExplorationFSM::init(ros::NodeHandle& nh) {
   completed_pub_ = nh.advertise<std_msgs::Bool>("/exploration_completed", 1, true);
   next_view_pub_ = nh.advertise<geometry_msgs::PoseStamped>("/exploration/next_view", 10);
   exploration_completed_sent_ = false;
+  stop_requested_ = false;
 }
 
 // Clamp a MEASURED velocity to something the kinodynamic search can actually start from.
@@ -81,6 +91,60 @@ Eigen::Vector3d FastExplorationFSM::clampStartVel(const Eigen::Vector3d& v) cons
   if (!std::isfinite(n)) return Eigen::Vector3d::Zero();
   if (n <= vmax || n < 1e-6) return v;
   return v * (vmax / n);
+}
+
+// Vertical half of the guard above. The magnitude clamp cannot see this case: a start velocity
+// that is small overall but almost entirely VERTICAL passes it untouched and still kills the
+// kinodynamic search, because the planning box is only 0.50 m tall (box_z 1.09..1.59).
+//
+// KinodynamicAstar prunes any motion primitive whose sampled trajectory leaves the box
+// (kinodynamic_astar.cpp:168-172). Climbing at vz needs vz^2/(2*a) of height to arrest, so the
+// search can only survive if that fits in the remaining headroom:
+//
+//     |vz| <= sqrt(2 * max_acc * headroom)
+//
+// Measured 2026-09-09 against the recorded failing case from run 20260909_062048 (start
+// 9.647 -1.602 1.385, vel 0.006 0.027 0.557, goal 9.584 0.452 1.239): the vehicle needed
+// 0.517 m to arrest but had 0.205 m of headroom, so 888 of 895 generated primitives were
+// pruned by the box test, the open set emptied, and the search returned NO_PATH on EVERY
+// replan for 14 minutes. Offline sweep of the real expansion loop confirms the relation
+// exactly -- failure onset at vz 0.35 (headroom 0.205, a 0.3), 0.50 (a 0.6), 0.56
+// (headroom 0.515) -- and confirms this clamp restores a path at every (altitude, vz) tested.
+//
+// A finer primitive-duration ladder does NOT help and was rejected on that evidence: the limit
+// is kinematic, not a search-resolution artifact.
+//
+// The velocity being clamped is largely not real motion in the first place -- it is FAST-LIO
+// accelerometer-bias drift leaking into the ESEKF velocity channel (ba reached 0.46 m/s^2 on
+// that run) while ground truth showed no vertical translation. Fixing that at source is the
+// proper repair; this keeps the planner alive until it lands.
+Eigen::Vector3d FastExplorationFSM::clampStartVelZ(const Eigen::Vector3d& p,
+                                                   const Eigen::Vector3d& v) const {
+  Eigen::Vector3d out = v;
+  if (!std::isfinite(v.z()) || !std::isfinite(p.z())) {
+    out.z() = 0.0;
+    return out;
+  }
+  Eigen::Vector3d bmin, bmax;
+  planner_manager_->edt_environment_->sdf_map_->getBox(bmin, bmax);
+
+  // Headroom in the direction of travel only: climbing is limited by the ceiling, descending
+  // by the floor.
+  const double head = (v.z() > 0.0) ? (bmax.z() - p.z()) : (p.z() - bmin.z());
+  if (head <= 0.0) {
+    out.z() = 0.0;   // already outside the box vertically; any vertical rate makes it worse
+    return out;
+  }
+  // 0.8 keeps a margin against the box edge rather than aiming to stop exactly on it.
+  const double vz_max = 0.8 * std::sqrt(2.0 * planner_manager_->pp_.max_acc_ * head);
+  if (std::fabs(out.z()) > vz_max) {
+    ROS_WARN_THROTTLE(2.0,
+                      "[FSM] start vz %.3f m/s exceeds what %.2f m of box headroom allows "
+                      "(%.3f m/s at a=%.2f); clamping so the kinodynamic search can plan.",
+                      out.z(), head, vz_max, planner_manager_->pp_.max_acc_);
+    out.z() = std::copysign(vz_max, out.z());
+  }
+  return out;
 }
 
 void FastExplorationFSM::FSMCallback(const ros::TimerEvent& e) {
@@ -202,6 +266,10 @@ void FastExplorationFSM::FSMCallback(const ros::TimerEvent& e) {
       // failures in place. Measured before this clamp: 90 of 119 replans failed, 60 of those
       // with a start speed over the search's 0.85 m/s ceiling, against 0 of 44 successes.
       fd_->start_vel_ = clampStartVel(fd_->start_vel_);
+      // Vertical guard, same single-point placement and for the same reason: the box is only
+      // 0.50 m tall, so a vertical rate the magnitude clamp happily passes can still prune
+      // every motion primitive. See clampStartVelZ.
+      fd_->start_vel_ = clampStartVelZ(fd_->start_pt_, fd_->start_vel_);
 
       // Inform traj_server the replanning
       replan_pub_.publish(std_msgs::Empty());
@@ -450,8 +518,30 @@ void FastExplorationFSM::frontierCallback(const ros::TimerEvent& e) {
   // }
 }
 
+void FastExplorationFSM::stopExplorationCallback(const std_msgs::BoolConstPtr& msg) {
+  if (!msg->data || stop_requested_) return;
+  stop_requested_ = true;
+  // Go straight to FINISH and skip the re-check budget. The re-checks exist to survive a
+  // MOMENTARY frontier gap; this is not that -- the mission layer has decided on evidence we
+  // do not have (a coverage plateau) that there is nothing left worth flying to, so retrying
+  // exploration planning would only keep us publishing trajectories the mission no longer
+  // wants. FINISH then publishes /exploration_completed exactly once, which is the signal the
+  // EDM already waits on before it takes over /planning/pos_cmd.
+  finish_recheck_count_ = finish_recheck_max_;
+  ROS_WARN("[FSM] stop requested by mission layer: ending exploration and handing over.");
+  if (state_ != FINISH) transitState(FINISH, "StopRequest");
+}
+
 void FastExplorationFSM::triggerCallback(const nav_msgs::PathConstPtr& msg) {
   if (msg->poses[0].pose.position.z < -0.1) return;
+  // Once the mission layer has called a halt, a stray trigger must not restart us. The
+  // waypoint_generator node self-triggers on this same topic (see below), so this is a real
+  // path, not a hypothetical one -- and re-arming here would put us back to publishing
+  // /planning/pos_cmd underneath the EDM's return leg.
+  if (stop_requested_) {
+    ROS_WARN_THROTTLE(5.0, "[FSM] ignoring trigger: exploration was stopped by the mission.");
+    return;
+  }
 
   // A trigger is an explicit instruction to explore, so it always renews the FINISH re-check
   // budget and re-arms exploration even if the FSM has already given up.

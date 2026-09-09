@@ -17,13 +17,14 @@ Mission States:
 import math
 import json
 import time
+from collections import deque
 import numpy as np
 import rospy
 
 from geometry_msgs.msg import PoseStamped, Point, Vector3
 from sensor_msgs.msg import PointCloud2, Imu
 import sensor_msgs.point_cloud2 as pc2
-from std_msgs.msg import String, Float64, Bool
+from std_msgs.msg import String, Float64, Bool, Float64MultiArray
 from nav_msgs.msg import Path, Odometry
 from mavros_msgs.msg import State
 # The EDM commands motion on /planning/pos_cmd (validated by flight_envelope_guard.py),
@@ -434,12 +435,60 @@ class EntryDetectionModuleNode:
         self.current_mode = ""
         self.state_start_time = rospy.Time.now()
 
+        # --- coverage-plateau completion -------------------------------------------------
+        # A SECOND, independent completion condition: mapped free area has stopped growing
+        # while coverage is already high. FUEL's own /exploration_completed stays the primary
+        # path and is untouched; this only matters when FUEL has not yet declared finish.
+        #
+        # Measured 2026-09-09 by replaying the recorded coverage streams of the three
+        # ground-truth-verified successful runs (20260908_141709, 20260908_143514,
+        # 20260909_040942) through this exact callback: at the defaults below the condition
+        # first holds at 98.09 / 98.48 / 99.19 % coverage, saving 70 / 117 / 74 s once armed.
+        #
+        # min_coverage_pct is a safety gate, not decoration. Run 20260908_160711 published
+        # exploration_completed = True at 95.3 % after the retirement machinery emptied the
+        # frontier list; a floor of 97 stops this trigger doing the same thing sooner.
+        self.coverage_hist = deque()          # (t, free_area_m2, pct) inside the window
+        self.plateau_fired = False            # one-shot latch
+        self.plateau_stop_sent_time = None    # when we asked FUEL to stop
+        # If FUEL never answers the stop request we must still come home rather than orbit the
+        # arena forever, so give up on the handshake after this long and transition anyway.
+        self.plateau_stop_timeout_s = rospy.get_param(
+            '/nidar/exploration_completion/stop_handshake_timeout_s', 15.0)
+
+        # --- absolute mission clock -------------------------------------------------------
+        # mission.clock_limit_s was documented as the 30-minute rule cap but NOTHING read it:
+        # grepped 2026-09-09, the only file mentioning clock_limit was the config defining it.
+        # The sole enforced timeout was return.max_duration, which applies only AFTER the
+        # mission has reached RETURN -- so a vehicle stuck in EXPLORATION was never landed.
+        # Run 20260909_062048 sat wedged at 49.5 % coverage for 14 minutes and was still
+        # flying when stopped by hand; it would have run until the battery.
+        self.mission_start_time = None
+        self.clock_limit_s = rospy.get_param('/nidar/mission/clock_limit_s', 1800.0)
+        # Leave enough of the budget to actually fly home rather than cutting at the very end.
+        self.clock_return_margin_s = rospy.get_param(
+            '/nidar/mission/clock_return_margin_s', 300.0)
+        self.clock_forced_return = False
+        self.plateau_window_s = rospy.get_param(
+            '/nidar/exploration_completion/plateau_window_s', 45.0)
+        self.plateau_growth_m2 = rospy.get_param(
+            '/nidar/exploration_completion/plateau_growth_m2', 0.5)
+        self.min_coverage_pct = rospy.get_param(
+            '/nidar/exploration_completion/min_coverage_pct', 97.0)
+        self.plateau_force = rospy.get_param(
+            '/nidar/exploration_completion/force_enabled', False)
+        rospy.loginfo("[EDM] coverage-plateau completion: window=%.0fs growth<%.2fm2 "
+                      "coverage>=%.1f%% force=%s",
+                      self.plateau_window_s, self.plateau_growth_m2,
+                      self.min_coverage_pct, self.plateau_force)
+
         # Subscribers
         rospy.Subscriber('/mavros/state', State, self.state_cb)
         rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.pose_cb)
         rospy.Subscriber('/Fast_LIO/odometry', Odometry, self.odom_cb)
         rospy.Subscriber('/cloud_registered', PointCloud2, self.cloud_cb)
         rospy.Subscriber('/exploration_completed', Bool, self.completed_cb)
+        rospy.Subscriber('/sdf_map/coverage', Float64MultiArray, self.coverage_cb)
 
         # Publishers
         self.pub_mission_state = rospy.Publisher('/edm/mission_state', String, queue_size=5)
@@ -454,12 +503,22 @@ class EntryDetectionModuleNode:
         # motion source in this stack goes through /planning/pos_cmd and is validated before it
         # reaches MAVROS; the EDM now does the same.
         self.pub_pos_cmd = rospy.Publisher('/planning/pos_cmd', PositionCommand, queue_size=10)
+        # Handshake out of exploration. FUEL transits to FINISH on this and then publishes the
+        # latched /exploration_completed we already subscribe to; see coverage_cb.
+        self.pub_stop_exploration = rospy.Publisher('/mission/stop_exploration', Bool,
+                                                    queue_size=1, latch=True)
 
         # 20Hz Main Control Loop
         self.timer = rospy.Timer(rospy.Duration(0.05), self.control_loop)
         rospy.loginfo("[EDM] Entry Detection Module Node initialized successfully.")
 
     def state_cb(self, msg):
+        # Anchor the mission clock on the first armed report. Everything else in this node
+        # measures time from the last STATE TRANSITION, which by construction can never bound
+        # the total flight -- see the clock check in control_loop().
+        if msg.armed and self.mission_start_time is None:
+            self.mission_start_time = rospy.Time.now()
+            rospy.loginfo("[EDM] mission clock started (limit %.0f s).", self.clock_limit_s)
         self.is_armed = msg.armed
         self.current_mode = msg.mode
 
@@ -525,6 +584,91 @@ class EntryDetectionModuleNode:
         if msg.data and self.state == MissionState.EXPLORATION:
             rospy.loginfo("[EDM] Exploration completed signal received! Transitioning to RETURN...")
             self.transition_to(MissionState.RETURN)
+
+    def coverage_cb(self, msg):
+        """Coverage-plateau completion trigger. See the block in __init__ for the rationale.
+
+        /sdf_map/coverage is published by MapROS::coverageCallback every map_ros/coverage_interval
+        (2.0 s). Layout, from map_ros.cpp:
+            [free_n, occ_n, unk_n, free_area, known_area, unknown_area,
+             denom, pct, left, layers, elapsed_s]
+        so index 3 is free area in m2 and index 7 is the observable-coverage percentage.
+
+        This never publishes on /exploration_completed. FUEL's FSM owns that topic and latches
+        it; a second latched publisher would leave subscribers with whichever wrote last. EDM
+        already owns the RETURN transition, so it transitions directly.
+        """
+        if len(msg.data) < 8:
+            return
+
+        # History is only meaningful inside one exploration episode. Clearing it outside
+        # EXPLORATION stops a window built during TAKEOFF/ENTRY -- when free area is flat
+        # because FUEL is not mapping yet -- from satisfying the plateau test on the first
+        # exploration sample.
+        if self.state != MissionState.EXPLORATION:
+            self.coverage_hist.clear()
+            return
+
+        now = rospy.Time.now().to_sec()
+        free = msg.data[3]
+        pct = msg.data[7]
+
+        self.coverage_hist.append((now, free, pct))
+        # Keep the OLDEST sample that is still at least a full window back, so the span
+        # measured below is always >= plateau_window_s rather than just under it.
+        #
+        # Trimming to `now - hist[0] <= window` instead -- the obvious way to write this --
+        # is silently broken: samples arrive every coverage_interval (2.0 s), so the span can
+        # only take discrete values, and a strict "span >= window" test then passes only when
+        # the two happen to line up. Measured 2026-09-09 by replaying the recorded coverage
+        # streams of the three successful runs through this callback: window=45 never fired on
+        # ANY of them (largest 2 s multiple below 45 is 44), and window=60 fired on
+        # 20260908_143514 and 20260909_040942 but not on 20260908_141709 -- pure floating-point
+        # luck on whether the span evaluated to 60.0 or 59.999...
+        while (len(self.coverage_hist) >= 2 and
+               now - self.coverage_hist[1][0] >= self.plateau_window_s):
+            self.coverage_hist.popleft()
+
+        if self.plateau_fired or len(self.coverage_hist) < 2:
+            return
+        # Judge only on a FULL window, or the test passes trivially at episode start.
+        if now - self.coverage_hist[0][0] < self.plateau_window_s:
+            return
+
+        growth = free - self.coverage_hist[0][1]
+        would = (pct >= self.min_coverage_pct) and (growth < self.plateau_growth_m2)
+
+        # Logged whether or not it is armed: this line is the calibration dataset.
+        rospy.loginfo_throttle(
+            10.0, "[EDM] plateau: pct=%.2f growth=%.2f m2 / %.0f s would_trigger=%s force=%s",
+            pct, growth, self.plateau_window_s, would, self.plateau_force)
+
+        if would and self.plateau_force:
+            self.plateau_fired = True
+            self.request_end_of_exploration(
+                "coverage plateau (%.2f%%, +%.2f m2 / %.0f s)"
+                % (pct, growth, self.plateau_window_s))
+
+    def request_end_of_exploration(self, reason):
+        """Ask FUEL to stop, instead of transitioning to RETURN underneath it.
+
+        Both endings the mission layer decides on its own -- the coverage plateau and the
+        mission clock -- used to call transition_to(RETURN) directly. That leaves FUEL in
+        EXEC_TRAJ, still publishing /planning/pos_cmd, while run_return() publishes the same
+        topic. Run 20260909_101738 is what that costs: the plateau fired at t=505.4 s but FUEL
+        did not finish until t=594.5 s, so for 89 s both drove the topic, coverage sat frozen at
+        99.24%, FAST-LIO then diverged at t=600 and PX4 failsafed the vehicle down 9.1 m from
+        the pad. Run 20260909_082915 failed the same way for 140 s.
+
+        FUEL answers on the latched /exploration_completed, which completed_cb already handles;
+        the watchdog in control_loop transitions anyway if that answer never comes.
+        """
+        if self.state != MissionState.EXPLORATION:
+            return
+        self.plateau_stop_sent_time = rospy.Time.now()
+        rospy.logwarn("[EDM] %s -- asking FUEL to stop exploring (waiting up to %.0f s for the "
+                      "handover).", reason, self.plateau_stop_timeout_s)
+        self.pub_stop_exploration.publish(Bool(data=True))
 
     def transition_to(self, new_state):
         rospy.loginfo(f"[EDM] State Transition: {self.state} ---> {new_state}")
@@ -931,6 +1075,48 @@ class EntryDetectionModuleNode:
         elapsed = (rospy.Time.now() - self.state_start_time).to_sec()
 
         dt = 0.05  # control_loop timer period
+
+        # --- absolute mission clock (BUG-3) ------------------------------------------------
+        # Bounds the WHOLE flight, independent of which state it is stuck in. Two stages so a
+        # timeout still ends on the pad rather than wherever it happened to be: force RETURN
+        # with the margin left to fly home, then force LAND at the hard limit.
+        if self.mission_start_time is not None:
+            mission_s = (rospy.Time.now() - self.mission_start_time).to_sec()
+            if (not self.clock_forced_return and
+                    mission_s >= self.clock_limit_s - self.clock_return_margin_s and
+                    self.state in (MissionState.ENTRY_SEARCH,
+                                   MissionState.ENTRY_CONFIRMATION,
+                                   MissionState.EXPLORATION)):
+                self.clock_forced_return = True
+                if self.state == MissionState.EXPLORATION:
+                    # Same handshake as the plateau: FUEL owns /planning/pos_cmd right now.
+                    self.request_end_of_exploration(
+                        "mission clock %.0f s of %.0f s, %.0f s reserved to fly home"
+                        % (mission_s, self.clock_limit_s, self.clock_return_margin_s))
+                else:
+                    # ENTRY_SEARCH / ENTRY_CONFIRMATION: FUEL has not been triggered yet, so
+                    # there is no second publisher to hand over from.
+                    rospy.logwarn("[EDM] mission clock %.0f s of %.0f s; %.0f s reserved to fly "
+                                  "home. Returning.",
+                                  mission_s, self.clock_limit_s, self.clock_return_margin_s)
+                    self.transition_to(MissionState.RETURN)
+            elif mission_s >= self.clock_limit_s and self.state != MissionState.LAND:
+                rospy.logerr("[EDM] mission clock hard limit %.0f s reached in state %s; "
+                             "landing here.", self.clock_limit_s, self.state)
+                self.transition_to(MissionState.LAND)
+
+        # --- stop-request handshake watchdog ------------------------------------------------
+        # completed_cb normally makes this transition when FUEL answers. If it never does, we
+        # must not orbit the arena indefinitely -- but we also must not take over pos_cmd early,
+        # so this waits the full timeout before forcing it.
+        if (self.plateau_stop_sent_time is not None and
+                self.state == MissionState.EXPLORATION and
+                (rospy.Time.now() - self.plateau_stop_sent_time).to_sec()
+                >= self.plateau_stop_timeout_s):
+            rospy.logerr("[EDM] FUEL did not acknowledge the stop request within %.0f s; "
+                         "returning anyway.", self.plateau_stop_timeout_s)
+            self.plateau_stop_sent_time = None
+            self.transition_to(MissionState.RETURN)
 
         if self.state == MissionState.TAKEOFF:
             # The vehicle must be seen ON THE PAD, on the ground, BEFORE any takeoff is

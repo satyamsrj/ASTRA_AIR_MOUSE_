@@ -31,6 +31,12 @@ FrontierFinder::FrontierFinder(const EDTEnvironment::Ptr& edt, ros::NodeHandle& 
   nh.param("frontier/cluster_size_z", cluster_size_z_, -1.0);
   nh.param("frontier/min_candidate_dist", min_candidate_dist_, -1.0);
   nh.param("frontier/min_candidate_clearance", min_candidate_clearance_, -1.0);
+  // Metres of ESDF clearance a viewpoint must have BEYOND the inflation band. 0 disables the
+  // first pass entirely and restores the previous behaviour exactly.
+  nh.param("frontier/viewpoint_standoff", viewpoint_standoff_, 0.0);
+  // Information gain in the ATSP cost. 0 = travel cost only, i.e. exactly the old matrix.
+  nh.param("exploration/gain_weight", gain_weight_, 0.0);
+  nh.param("exploration/gain_ref_cells", gain_ref_cells_, 200.0);
   nh.param("frontier/candidate_dphi", candidate_dphi_, -1.0);
   nh.param("frontier/candidate_rmax", candidate_rmax_, -1.0);
   nh.param("frontier/candidate_rmin", candidate_rmin_, -1.0);
@@ -600,6 +606,25 @@ void FrontierFinder::getPathForTour(
   }
 }
 
+// How much cheaper this cluster should look to the tour, purely because it is worth more.
+//
+// FUEL orders frontiers by travel cost alone -- ViewNode::computeCost() is
+// max(path_len/v_max, yaw_diff/yaw_rate), seconds of flying, and nothing else -- so a cluster
+// worth 17 unknown cells competes on equal terms with one worth 1188. Run 20260909_111512
+// measured exactly that: at t=220 s there were 3184 unknown columns, 1188 of them in
+// cx 6.5-9.0 and only 17 beyond cx 15.5, and the vehicle then spent t=223-317 s holding
+// targets at cx 16.0-16.3. The 3.0 s hysteresis defended the bad pick and the only corrective
+// was the 40 s global-stale watchdog, which fired three times -- about the whole 94 s stall.
+//
+// Returns a multiplier in [1/(1+gain_weight), 1]: big clusters get discounted, small ones are
+// left alone. gain_weight_ == 0 returns exactly 1.0, which reproduces the previous matrix
+// element for element -- that is the rollback, and it needs no rebuild.
+double FrontierFinder::gainWeight(const Frontier& ftr) const {
+  if (gain_weight_ <= 0.0 || gain_ref_cells_ <= 0.0) return 1.0;
+  const double n = std::min(1.0, double(ftr.cells_.size()) / gain_ref_cells_);
+  return 1.0 / (1.0 + gain_weight_ * n);
+}
+
 void FrontierFinder::getFullCostMatrix(
     const Vector3d& cur_pos, const Vector3d& cur_vel, const Vector3d cur_yaw,
     Eigen::MatrixXd& mat) {
@@ -660,6 +685,25 @@ void FrontierFinder::getFullCostMatrix(
           ViewNode::computeCost(cur_pos, vj.pos_, cur_yaw[0], vj.yaw_, cur_vel, cur_yaw[1], path);
     }
     // std::cout << "" << std::endl;
+
+    // Discount the cost of ARRIVING at a cluster by how much it is worth. Scaling column k
+    // covers every origin at once -- the vehicle's own row 0 and every other cluster's row --
+    // so the tour prefers high-gain clusters from wherever it happens to be. Column 0 is the
+    // free return-to-depot column that leftCols<1>().setZero() owns; leave it alone.
+    if (gain_weight_ > 0.0) {
+      int k = 1;
+      double w_min = 1.0, w_max = 0.0;
+      for (auto& ftr : frontiers_) {
+        const double w = gainWeight(ftr);
+        mat.col(k) *= w;
+        w_min = std::min(w_min, w);
+        w_max = std::max(w_max, w);
+        ++k;
+      }
+      ROS_WARN_THROTTLE(5.0,
+          "[FUEL GAIN] %zu clusters, arrival-cost weight in [%.3f, %.3f] (gain_weight %.2f, "
+          "ref %.0f cells)", frontiers_.size(), w_min, w_max, gain_weight_, gain_ref_cells_);
+    }
   }
 }
 
@@ -731,8 +775,37 @@ void FrontierFinder::findViewpoints(
 }
 
 // Sample viewpoints around frontier's average position, check coverage to the frontier cells
+//
+// STANDOFF (added 2026-09-09). Admissibility used to be getInflateOccupancy(sample) == 1 and
+// nothing else, which accepts a viewpoint anywhere the inflated band does not already cover --
+// including the single voxel immediately outside it. That is where the vehicle kept parking:
+// on run 20260909_075414 the three most-selected viewpoints were camera_init (16.1,-6.0) x60,
+// (13.6,-5.6) x42 and (16.1,-5.7) x17, all pressed against the x = 16.30 box edge, and the run
+// sat at 91.2-91.7 % coverage for 240 s while flying normally at 0.24-0.47 m/s. Jammed against
+// a wall the sensor sees the wall, so the frontier that justified the trip never gets observed
+// and the viewpoint is selected again on the next cycle.
+//
+// The check uses the CONTINUOUS ESDF rather than probing more voxels. getDistance() is already
+// maintained every cycle (updateESDF3d) and astar.cpp already gates on it exactly this way, so
+// it costs one lookup and has no quantisation cliff -- which matters here, because raising
+// obstacles_inflation instead is what severs this arena: inf_step = ceil(inflation/resolution)
+// turns 0.45 into 5 cells = 0.50 m and leaves 0.8 m2 of free space. Nothing below is allowed to
+// touch the map or the inflation; this only moves where a viewpoint may STAND.
+//
+// distance_buffer_ is built from occupancy_buffer_inflate_, so getDistance() already reads as
+// clearance BEYOND the 0.40 m inflation band, and unmapped cells read default_dist_ = 5.0 --
+// i.e. the test fails open, never closed, outside the ESDF's updated region.
+//
+// Two passes, and the second has no standoff at all. A frontier that can only be seen from
+// against a wall keeps its viewpoint exactly as before, so this can reorder and improve
+// viewpoint choice but can never take a frontier away and strand coverage.
 void FrontierFinder::sampleViewpoints(Frontier& frontier) {
   int n_total = 0, n_out_map = 0, n_coll = 0, n_clearance = 0, n_low_vis = 0, n_acc = 0;
+  int n_standoff = 0, pass_used = 0;
+  for (int pass = 0; pass < 2; ++pass) {
+    const double standoff = (pass == 0) ? viewpoint_standoff_ : 0.0;
+    pass_used = pass;
+    n_total = n_out_map = n_coll = n_clearance = n_low_vis = n_acc = n_standoff = 0;
   // Evaluate sample viewpoints on circles, find ones that cover most cells
   for (double rc = candidate_rmin_, dr = (candidate_rmax_ - candidate_rmin_) / candidate_rnum_;
        rc <= candidate_rmax_ + 1e-3; rc += dr)
@@ -757,6 +830,15 @@ void FrontierFinder::sampleViewpoints(Frontier& frontier) {
       if (edt_env_->sdf_map_->getInflateOccupancy(sample_pos) == 1) {
         n_coll++;
         continue;
+      }
+      if (standoff > 0.0) {
+        // getDistance returns -1 outside the map; isInBox above already excluded that, and a
+        // negative value must not be read as "too close" anyway.
+        const double clearance = edt_env_->sdf_map_->getDistance(sample_pos);
+        if (clearance >= 0.0 && clearance < standoff) {
+          n_standoff++;
+          continue;
+        }
       }
       if (isNearUnknown(sample_pos)) {
         n_clearance++;
@@ -785,10 +867,16 @@ void FrontierFinder::sampleViewpoints(Frontier& frontier) {
         n_low_vis++;
       }
     }
+    // Pass 0 found somewhere to stand that is not against a wall: done. Otherwise fall through
+    // to pass 1, which is byte-for-byte the old behaviour.
+    if (!frontier.viewpoints_.empty() || viewpoint_standoff_ <= 0.0) break;
+  }
 
   ROS_WARN_THROTTLE(2.0,
-      "[FUEL VIEWPOINT DIAG] Generated: %d | Accepted: %d | OutMap: %d | Coll: %d | Clearance: %d | LowVis: %d",
-      n_total, n_acc, n_out_map, n_coll, n_clearance, n_low_vis);
+      "[FUEL VIEWPOINT DIAG] Generated: %d | Accepted: %d | OutMap: %d | Coll: %d | Standoff: %d "
+      "| Clearance: %d | LowVis: %d | pass %d (standoff %.2f m)",
+      n_total, n_acc, n_out_map, n_coll, n_standoff, n_clearance, n_low_vis, pass_used,
+      viewpoint_standoff_);
 }
 
 bool FrontierFinder::isFrontierCovered() {

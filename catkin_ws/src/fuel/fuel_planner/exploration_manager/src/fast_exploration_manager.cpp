@@ -390,6 +390,31 @@ int FastExplorationManager::planExploreMotion(
   ed_->path_next_goal_ = planner_manager_->path_finder_->getPath();
   shortenPath(ed_->path_next_goal_);
 
+  // ---- degenerate path: the vehicle is already standing on the viewpoint ----------------
+  // A* returns a single node when start and goal fall in the same voxel, and shortenPath only
+  // pads a 2-point path up to 3 -- a 1-point path passes straight through it. That path then
+  // reached planExploreTraj, which cannot build a trajectory from one point and segfaulted:
+  // run 20260909_094450 died here at t=278.28 s with start pos (16.1394, -2.27787, 1.24445)
+  // and "Next view" (16.1392, -2.27784, 1.24459) -- 0.3 mm apart. exploration_node exited on
+  // SIGSEGV and the vehicle hovered for the remaining ~13 min of the run, which is the "stall".
+  //
+  // The crash is now guarded inside planExploreTraj as well, but returning here is not merely
+  // crash avoidance: a viewpoint the vehicle already occupies has nothing left to offer it. If
+  // standing on it does not clear the frontier, flying to it again never will, so the honest
+  // move is to retire the cluster and let the planner pick a different one. Retirement is
+  // rate-limited inside requestRetireFrontierNear, so this cannot empty the frontier list.
+  if (ed_->path_next_goal_.size() < 2 ||
+      Astar::pathLength(ed_->path_next_goal_) < 1e-3) {
+    ROS_WARN_THROTTLE(1.0,
+        "[FSM] already standing on viewpoint (%.3f %.3f %.3f), %.4f m away with a %zu-point "
+        "path: retiring it instead of planning a null trajectory.",
+        next_pos(0), next_pos(1), next_pos(2), (next_pos - pos).norm(),
+        ed_->path_next_goal_.size());
+    frontier_finder_->requestRetireFrontierNear(next_pos);
+    ed_->has_last_target_ = false;
+    return FAIL;
+  }
+
   const double radius_far = 5.0;
   const double radius_close = 1.5;
   const double len = Astar::pathLength(ed_->path_next_goal_);
@@ -422,8 +447,36 @@ int FastExplorationManager::planExploreMotion(
     ed_->next_goal_ = next_pos;
 
     if (!planner_manager_->kinodynamicReplan(
-            pos, vel, acc, ed_->next_goal_, Vector3d(0, 0, 0), time_lb))
+            pos, vel, acc, ed_->next_goal_, Vector3d(0, 0, 0), time_lb)) {
+      // This branch used to return FAIL silently -- no log line, no counter, and no effect on
+      // the target_fail_streak_ escalation that the A* branch above feeds. It is by far the
+      // dominant failure mode when it happens, and it was invisible: run 20260908_162224 and
+      // run 20260909_062048 logged 52762 "plan fail" against only 177 "No path to next
+      // viewpoint", the entire 52585 difference coming from here, and the run stalled for
+      // 14 minutes with nothing in the log naming the cause.
+      //
+      // Log it, and feed the SAME streak the A* failure feeds, so a target that is
+      // kinodynamically infeasible escalates exactly like one that is geometrically
+      // unreachable instead of being retried forever.
+      if (ed_->target_fail_streak_ == 0) ed_->target_fail_streak_start_ = ros::Time::now();
+      ++ed_->target_fail_streak_;
+      const double streak_s = (ros::Time::now() - ed_->target_fail_streak_start_).toSec();
+      ROS_ERROR_THROTTLE(1.0,
+                         "[FSM] kinodynamic replan failed (streak %d over %.1f s): start (%.2f "
+                         "%.2f %.2f) vel (%.2f %.2f %.2f) -> goal (%.2f %.2f %.2f)",
+                         ed_->target_fail_streak_, streak_s, pos(0), pos(1), pos(2), vel(0),
+                         vel(1), vel(2), ed_->next_goal_(0), ed_->next_goal_(1),
+                         ed_->next_goal_(2));
+      if (ed_->target_fail_streak_ >= ep_->target_fail_limit_ &&
+          streak_s >= ep_->target_fail_min_seconds_) {
+        ROS_WARN("[FSM] target kinodynamically unreachable %d cycles over %.1f s; releasing it.",
+                 ed_->target_fail_streak_, streak_s);
+        frontier_finder_->requestRetireFrontierNear(next_pos);
+        ed_->has_last_target_ = false;
+        ed_->target_fail_streak_ = 0;
+      }
       return FAIL;
+    }
   }
 
   if (planner_manager_->local_data_.position_traj_.getTimeSum() < time_lb - 0.1)

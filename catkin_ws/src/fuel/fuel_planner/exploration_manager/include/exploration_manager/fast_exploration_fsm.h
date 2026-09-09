@@ -6,6 +6,7 @@
 #include <ros/ros.h>
 #include <nav_msgs/Path.h>
 #include <std_msgs/Empty.h>
+#include <std_msgs/Bool.h>
 #include <nav_msgs/Odometry.h>
 #include <visualization_msgs/Marker.h>
 
@@ -60,12 +61,16 @@ private:
   // than momentarily frontier-less. The mission layer (EDM) waits on /exploration_completed to
   // start the return leg; upstream FUEL never published anything, so RETURN was unreachable.
   bool exploration_completed_sent_;
+  // Set by /mission/stop_exploration. The mission layer may decide exploration is
+  // over before FUEL's own frontier logic does (coverage plateau); this is the
+  // handshake that lets it stop us WITHOUT both of us driving /planning/pos_cmd.
+  bool stop_requested_;
   ros::Time finish_last_recheck_;
 
   /* ROS utils */
   ros::NodeHandle node_;
   ros::Timer exec_timer_, safety_timer_, vis_timer_, frontier_timer_;
-  ros::Subscriber trigger_sub_, odom_sub_;
+  ros::Subscriber trigger_sub_, odom_sub_, stop_sub_;
   ros::Publisher replan_pub_, new_pub_, bspline_pub_, completed_pub_;
   // The viewpoint this replan actually committed to. Published purely so a run can be analysed
   // afterwards: "Next view:" already went to std::cout, but with no timestamp, which makes it
@@ -80,12 +85,16 @@ private:
   // Clamp a measured (noisy) velocity to what the kinodynamic search will accept as a start
   // state; see the definition for the measurements behind it.
   Eigen::Vector3d clampStartVel(const Eigen::Vector3d& v) const;
+  // Vertical half of the same guard. Needs the position, because the limit depends on how much
+  // room is left above/below inside the planning box. See the definition.
+  Eigen::Vector3d clampStartVelZ(const Eigen::Vector3d& p, const Eigen::Vector3d& v) const;
 
   /* ROS functions */
   void FSMCallback(const ros::TimerEvent& e);
   void safetyCallback(const ros::TimerEvent& e);
   void frontierCallback(const ros::TimerEvent& e);
   void triggerCallback(const nav_msgs::PathConstPtr& msg);
+  void stopExplorationCallback(const std_msgs::BoolConstPtr& msg);
   void odometryCallback(const nav_msgs::OdometryConstPtr& msg);
   void visualize();
   void clearVisMarker();

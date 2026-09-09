@@ -268,7 +268,20 @@ bool FastPlannerManager::kinodynamicReplan(const Eigen::Vector3d& start_pt,
 
 void FastPlannerManager::planExploreTraj(const vector<Eigen::Vector3d>& tour,
     const Eigen::Vector3d& cur_vel, const Eigen::Vector3d& cur_acc, const double& time_lb) {
-  if (tour.empty()) ROS_ERROR("Empty path to traj planner");
+  // A tour of fewer than two DISTINCT points has no trajectory to generate, and every step
+  // below assumes at least one segment. It used to fall straight through this check -- the
+  // ROS_ERROR did not return -- and segfault: with pt_num == 1, times(pt_num - 1) is a
+  // zero-length vector, waypointsTraj() yields an empty PolynomialTraj, getTotalTime() and
+  // getLength() are 0, so dt is 0 and the sampling loop below calls evaluate() on an empty
+  // trajectory. Backtrace from run 20260909_094450 (t=278.28 s), frame #0:
+  //     FastPlannerManager::planExploreTraj -> Segmentation fault (nil)
+  // which killed exploration_node outright and left the vehicle hovering for the rest of the
+  // flight. The caller now avoids this case, but the guard belongs here too: nothing in this
+  // function can produce a valid trajectory from a single point.
+  if (tour.size() < 2) {
+    ROS_ERROR("planExploreTraj: refusing a %zu-point tour; need at least 2.", tour.size());
+    return;
+  }
 
   // Generate traj through waypoints-based method
   const int pt_num = tour.size();
@@ -289,6 +302,17 @@ void FastPlannerManager::planExploreTraj(const vector<Eigen::Vector3d>& tour,
   int seg_num = init_traj.getLength() / pp_.ctrl_pt_dist;
   seg_num = max(8, seg_num);
   double dt = duration / double(seg_num);
+
+  // Second guard, on the same failure from the other side. Two waypoints that are distinct but
+  // coincident to within floating point still give duration == 0, hence dt == 0, and the
+  // sampling loop below (`ts += dt`) then never advances -- an unbounded push_back on `points`
+  // rather than a crash, which is a worse failure because it looks like a hang. Neither can be
+  // planned; say so and leave rather than spin.
+  if (!(duration > 0.0) || !(dt > 0.0)) {
+    ROS_ERROR("planExploreTraj: degenerate tour (duration %.6f s, dt %.6f s); nothing to plan.",
+              duration, dt);
+    return;
+  }
 
   std::cout << "duration: " << duration << ", seg_num: " << seg_num << ", dt: " << dt << std::endl;
 

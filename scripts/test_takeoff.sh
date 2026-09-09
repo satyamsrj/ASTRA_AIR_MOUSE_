@@ -31,6 +31,21 @@ if [ "$RVIZ_ARG" = "1" ] || [ "$RVIZ_ARG" = "true" ]; then RVIZ_ARG=true; else R
 echo "Starting clean FUEL exploration test (GUI=${GUI_ARG}, vehicle=${VEHICLE}) at position (X=${SPAWN_X}, Y=${SPAWN_Y}, Z=${SPAWN_Z}, Yaw=${SPAWN_YAW})..."
 
 # Ensure clean slate
+# Refuse to fly a tree whose fixes are not actually in the binaries. On 2026-09-09
+# entry_detection_module.py and fast_exploration_fsm.cpp were reverted twice (09:29:36 and
+# 10:49:15) to a pre-handshake state; four runs were flown and analysed before anyone noticed,
+# and one of them lost 136 s of its 164 s stall to the exact race the missing code prevents.
+# Set SKIP_PARITY=1 to fly anyway (e.g. deliberately testing a baseline).
+if [ "${SKIP_PARITY:-0}" != "1" ]; then
+    if ! "$(dirname "$0")/verify_fix_parity.sh"; then
+        echo
+        echo "Refusing to launch: the code you think you are testing is not what would run."
+        echo "  python3 scripts/apply_handshake_fix.py && catkin build exploration_manager"
+        echo "  (or re-run with SKIP_PARITY=1 to fly the tree as-is)"
+        exit 1
+    fi
+fi
+
 killall -9 rosmaster rosout roslaunch gzserver gzclient px4 mavros_node rostopic px4-simulator_mavlink 2>/dev/null || true
 pkill -f flight_envelope_guard.py 2>/dev/null || true
 pkill -f relay_odometry.py 2>/dev/null || true

@@ -198,13 +198,51 @@
     <param name="exploration/target_progress_eps" value="0.15" type="double"/>
     <!-- Ignores target identity: retires whatever target is held when no cluster has been
          covered for this long. Catches the thrashing case the per-target timer misses. -->
-    <param name="exploration/global_stale_seconds" value="40.0" type="double"/>
+    <!-- 25, was 40. This is how long a worthless target can be held before the watchdog
+         retires it, and it is the ONLY corrective for a bad pick: the 3.0 s hysteresis margin
+         actively defends whatever was chosen. Run 20260909_111512 spent a 94 s stall on it -
+         three firings at 40 s each, the first retiring (16.13, 6.28, 1.19). The clock resets
+         every time a cluster is covered, and that happened 231 times in 407 s in that run
+         (~once per 1.8 s while productive), so 25 s is nowhere near a healthy traverse. -->
+    <param name="exploration/global_stale_seconds" value="25.0" type="double"/>
+
+    <!-- Information gain in the ATSP arrival cost. FUEL orders frontiers by travel cost alone
+         (ViewNode::computeCost = max(path_len/v_max, yaw_diff/yaw_rate)), so a 17-cell cluster
+         and a 1188-cell cluster look identical to the tour. Measured on 20260909_111512 at
+         t=220 s: 3184 unknown columns, 1188 in cx 6.5-9.0, 17 beyond cx 15.5 - and the vehicle
+         flew to cx 16.0-16.3 and held it for 94 s.
+
+         Arrival cost at cluster k is multiplied by 1/(1 + gain_weight * min(1, cells/ref)):
+             17 cells  -> 0.958 (essentially unchanged)
+            200+ cells -> 0.667 (33% cheaper)
+         so large unknown mass outranks a far-away scrap without small frontiers being
+         abandoned - they are deferred, not dropped, so final coverage must not regress.
+
+         ROLLBACK: set gain_weight to 0.0. That returns the cost matrix element for element to
+         what it was, and needs no rebuild. -->
+    <param name="exploration/gain_weight" value="0.5" type="double"/>
+    <param name="exploration/gain_ref_cells" value="200.0" type="double"/>
 
     <param name="frontier/cluster_min" value="30" type="int"/>
     <param name="frontier/cluster_size_xy" value="2.0" type="double"/>
     <param name="frontier/cluster_size_z" value="10.0" type="double"/>
     <param name="frontier/min_candidate_dist" value="0.5" type="double"/>
     <param name="frontier/min_candidate_clearance" value="0.10" type="double"/>
+    <!-- Metres of ESDF clearance a viewpoint must keep BEYOND the 0.40 m inflation band, i.e.
+         0.25 here means ~0.65 m from the true wall surface. Applied as a first-pass preference
+         only: if a frontier has no viewpoint that clears it, sampleViewpoints re-runs with 0 and
+         behaves exactly as before, so no frontier can be lost to this.
+
+         Sized against measured localisation error, not guessed. On the two clean runs the
+         rigid-aligned ground-truth residual was median 0.09 m / p90 0.16 m (20260909_040942 and
+         20260909_075414); the noisier 20260909_082915 was median 0.44 m / p90 0.84 m over its
+         mapping phase. 0.25 covers the clean case with margin and stays well inside the 0.130 m
+         of usable margin the inflation band already provides on top of it.
+
+         This is deliberately NOT done by raising obstacles_inflation: inf_step =
+         ceil(inflation/resolution) quantises 0.45 to 5 cells = 0.50 m, which severs this arena
+         down to 0.8 m2 of free space. The standoff moves viewpoints only; the map is untouched. -->
+    <param name="frontier/viewpoint_standoff" value="0.25" type="double"/>
     <param name="frontier/candidate_dphi" value="$(eval 10 * 3.1415926 / 180.0)" type="double"/>
     <param name="frontier/candidate_rnum" value="5" type="int"/>
     <!-- rmin was 0.4. Viewpoints are clamped to z in [1.35,1.45] (below) while frontier cells span

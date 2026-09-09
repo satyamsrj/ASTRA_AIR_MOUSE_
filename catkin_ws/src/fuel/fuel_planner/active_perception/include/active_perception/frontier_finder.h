@@ -121,6 +121,7 @@ private:
   void sampleViewpoints(Frontier& frontier);
 
   int countVisibleCells(const Vector3d& pos, const double& yaw, const vector<Vector3d>& cluster);
+  double gainWeight(const Frontier& ftr) const;
   bool isNearUnknown(const Vector3d& pos);
   vector<Eigen::Vector3i> sixNeighbors(const Eigen::Vector3i& voxel);
   vector<Eigen::Vector3i> tenNeighbors(const Eigen::Vector3i& voxel);
@@ -164,6 +165,13 @@ private:
   double candidate_rmax_, candidate_rmin_, candidate_dphi_, min_candidate_dist_,
       min_candidate_clearance_;
   double min_candidate_z_, max_candidate_z_;
+  // ESDF clearance a viewpoint must keep beyond the inflation band; 0 disables. See the
+  // comment on sampleViewpoints for why this is a two-pass preference, not a hard filter.
+  double viewpoint_standoff_;
+  // Information-gain weighting of the ATSP cost matrix. 0 disables and reproduces the
+  // travel-cost-only matrix exactly. See getFullCostMatrix.
+  double gain_weight_;
+  double gain_ref_cells_;
   int down_sample_;
   double min_view_finish_fraction_, resolution_;
   int min_visib_num_, candidate_rnum_;

@@ -254,6 +254,51 @@ nidar:
     max_duration: 240.0
 
   # ---------------------------------------------------------------------------
+  # EXPLORATION COMPLETION (coverage plateau)
+  # ---------------------------------------------------------------------------
+  # A SECOND completion condition, consumed by entry_detection_module.py. FUEL's own
+  # /exploration_completed remains the primary path and is untouched; this only matters when
+  # FUEL has not yet declared finish.
+  #
+  # Why it exists: measured across the three ground-truth-verified successful runs, 25-37 % of
+  # each flight is spent after coverage has effectively stopped growing --
+  #   20260908_141709  reached 97.7 % at t=436 s, touched down at 582 s   (146 s)
+  #   20260908_143514  reached 98.1 % at t=310 s, touched down at 495 s   (185 s)
+  #   20260909_040942  reached 98.6 % at t=467 s, touched down at 612 s   (145 s)
+  # The return leg itself is only 25-30 s of that. The rest is the planner chasing the last
+  # ~1 % of coverage.
+  #
+  # Calibrated 2026-09-09 by replaying the recorded coverage streams of those three runs
+  # through the real callback in entry_detection_module.py. See
+  # PLANNING_DOCS/phase1_coverage_plateau_completion_implementation_2026-09-09.md
+  #
+  # NOT the same thing as mission.coverage_plateau_window_s / coverage_plateau_threshold
+  # further down this file. Those two have no consumer anywhere in the tree (checked
+  # 2026-09-09) and are unused; these are the live ones.
+  exploration_completion:
+    # 45 s, not 60. Measured 2026-09-09 by replaying the recorded coverage streams of the
+    # three successful runs through the real callback: at 60 s the condition never became true
+    # on 20260908_141709 at all (its 60 s growth stayed above the threshold until the stream
+    # ended), so that run got no benefit. 45 s fires on all three -- at 98.09 / 98.48 / 99.19 %
+    # coverage, saving 70 / 117 / 74 s. 30 s saves another ~15 s but gives up more coverage.
+    # 30 s, tightened from 45 on 2026-09-09. Replaying run 20260909_090542's recorded coverage
+    # stream through the real callback: 45 s fires at t=476.0 s and 99.43 % coverage, 30 s fires
+    # at t=428.0 s and 98.88 %, 20 s at t=418.0 s and the same 98.88 %. So 30 buys 48 s for
+    # 0.55 % of coverage, and 20 buys only 10 s more for nothing extra -- 30 is the knee.
+    plateau_window_s: 30.0     # judge growth over this long a window; needs a FULL window
+    plateau_growth_m2: 0.5     # below this much new free area over the window == plateau
+    # SAFETY GATE, not decoration. Run 20260908_160711 published exploration_completed = True
+    # at 95.3 % after the retirement machinery emptied the frontier list; a floor of 97 stops
+    # this trigger from doing the same thing sooner. Lowering it to 95 changes NOTHING on a
+    # healthy run -- the plateau only occurs above 98 % -- so the floor costs no time at all
+    # and only buys protection. Do not lower it.
+    min_coverage_pct: 97.0
+    # Observe-only. The trigger is evaluated and logged every cycle but does not act until this
+    # is true. Arm it only after >= 3 runs confirm 'would_trigger' first goes true above 98 %
+    # coverage and 50-150 s before the run actually ended.
+    force_enabled: true
+
+  # ---------------------------------------------------------------------------
   # FLIGHT LIMITS
   # ---------------------------------------------------------------------------
   flight:
@@ -584,7 +629,12 @@ nidar:
   # ---------------------------------------------------------------------------
   mission:
     phases: [IDLE, ARM, TAKEOFF, TRANSIT_IN, EXPLORE, TRANSIT_OUT, DESCEND, LAND, DISARM]
+    # ENFORCED since 2026-09-09 by entry_detection_module.py (BUG-3): before that this key
+    # had no consumer anywhere in the tree and nothing bounded the flight at all.
     clock_limit_s: 1800.0        # 30 min hard limit per the rules
+    # Reserved out of the budget to fly home, so a timeout still ends on the pad. RETURN is
+    # forced at (clock_limit_s - this); LAND-in-place only at the hard limit.
+    clock_return_margin_s: 300.0
     explore_no_frontier_hold_s: 10.0
     coverage_plateau_window_s: 60.0
     coverage_plateau_threshold: 0.01
