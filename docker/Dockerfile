@@ -177,6 +177,32 @@ RUN git clone https://github.com/Livox-SDK/Livox-SDK.git /tmp/Livox-SDK && \
     rm -rf /tmp/Livox-SDK
 
 ############################################################
+# NVIDIA GPU Runtime Support
+#
+# These env vars are read by the NVIDIA Container Toolkit on the host when
+# the container is launched with `--gpus all` (see scripts/docker_dev_start.sh).
+# They are no-ops on a CPU-only host / without --gpus.
+############################################################
+
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+
+############################################################
+# GPU Inference Stack (PyTorch + Ultralytics/YOLO)
+#
+# CUDA runtime ships inside the torch wheel itself, so no system CUDA
+# toolkit install is required here -- only a host driver + nvidia-container-
+# toolkit compatible with CUDA 12.1 (any driver >= 525 works).
+############################################################
+
+RUN pip3 install --no-cache-dir \
+    torch==2.2.2 torchvision==0.17.2 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+RUN pip3 install --no-cache-dir \
+    ultralytics==8.2.103
+
+############################################################
 # PX4 Autopilot & ROS Python Dependencies
 ############################################################
 

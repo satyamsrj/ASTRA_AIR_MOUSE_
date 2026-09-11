@@ -26,7 +26,23 @@ Before setting up the environment, ensure your host system meets the following s
   ```
 * **Graphics Drivers:** OpenGL 3.3+ hardware acceleration (NVIDIA proprietary drivers or Intel/AMD Mesa drivers).
 
-### 4. Recommended Hardware Specifications
+### 4. GPU Access for Onboard Inference (optional, for YOLO detection work)
+* **NVIDIA Driver:** Host driver `>= 525` (CUDA 12.1 compatible; the image ships a self-contained CUDA 12.1 PyTorch build, no host CUDA toolkit needed).
+* **NVIDIA Container Toolkit:** Required so Docker can pass the GPU through to the container:
+  ```bash
+  distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
+  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | \
+    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+    sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+  sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+  sudo nvidia-ctk runtime configure --runtime=docker
+  sudo systemctl restart docker
+  ```
+* **Verify:** `docker info | grep -i nvidia` should list the `nvidia` runtime. `scripts/docker_dev_start.sh` auto-detects this and adds `--gpus all` when launching the container; it falls back to CPU-only with a warning if not found.
+* **Test trial:** once inside the container, run `python3 scripts/test_gpu_inference.py` to confirm the container sees the GPU and can run a real YOLOv8 forward pass on it.
+
+### 5. Recommended Hardware Specifications
 * **CPU:** Quad-core 2.5GHz+ processor (8+ threads recommended for concurrent SITL, SLAM, and FUEL planning loops).
 * **RAM:** Minimum **8 GB** (16 GB recommended for parallel `catkin build` compilation).
 * **Disk Storage:** **25 GB** free storage space (for Docker image, PX4 SITL build targets, and ROS workspace build files).
