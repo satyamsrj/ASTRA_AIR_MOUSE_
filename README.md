@@ -109,12 +109,14 @@ NIDAR/
 │   └── build_px4.sh
 ├── simulation/
 │   ├── custom_models/
-│   │   ├── iris_vlp16/            # NOTE: not the spawned model -- see the header in that file
+│   │   ├── arina_nidar/           # ACTIVE arena mesh loaded by nidar_competition.world
+│   │   ├── launch_pad/            # Spawn + return pad at world (0, -9.5)
+│   │   ├── iris_vlp16/            # Legacy airframe, superseded by x500_vlp16; not spawned
 │   │   ├── tfmini_lidar/          # Downward TFmini rangefinder (fixed-altitude 2D flight)
 │   │   ├── velodyne_vlp16/
-│   │   └── nidar_arena/           # Arena mesh loaded by nidar_competition.world
+│   │   └── nidar_arena/           # Previous arena, kept for regression runs
 │   └── PX4-Autopilot-v1.14.3/     # Vendored PX4 firmware (96% of tracked files; see cleanup plan Sec 4.4)
-│       └── .../models/iris_vlp16/iris_vlp16.sdf   # <- the model Gazebo ACTUALLY spawns
+│       └── .../models/x500_vlp16/x500_vlp16.sdf   # <- the model Gazebo ACTUALLY spawns
 └── PLANNING_DOCS/                 # Active engineering plans; archive/ holds resolved ones
 ```
 

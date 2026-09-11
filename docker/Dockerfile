@@ -16,6 +16,11 @@ ENV TZ=Etc/UTC
 
 ############################################################
 # Basic Linux packages
+#
+# psmisc supplies killall, which scripts/test_takeoff.sh uses to clear the
+# previous run. Without it that cleanup line fails silently (stderr is
+# discarded and `|| true` swallows the error) and every re-run inherits the
+# old rosmaster/gzserver/px4/mavros_node processes.
 ############################################################
 
 RUN apt-get update && apt-get install -y \
@@ -40,6 +45,7 @@ RUN apt-get update && apt-get install -y \
     net-tools \
     iputils-ping \
     htop \
+    psmisc \
     && rm -rf /var/lib/apt/lists/*
 
 ############################################################
@@ -90,13 +96,41 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 ############################################################
+# PX4 SITL (Gazebo Classic) build dependencies
+#
+# Matches simulation/PX4-Autopilot-v1.14.3/Tools/setup/ubuntu.sh. Without the
+# gstreamer -dev packages, sitl_gazebo-classic's CMake configure fails with
+# GSTREAMER_APP_LIBRARIES set to NOTFOUND (gazebo11/libgazebo11-dev already
+# come in via ros-noetic-desktop-full above).
+############################################################
+
+RUN apt-get update && apt-get install -y \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-ugly \
+    gstreamer1.0-libav \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
+    dmidecode \
+    libimage-exiftool-perl \
+    && rm -rf /var/lib/apt/lists/*
+
+############################################################
 # MAVROS
 ############################################################
 
 RUN apt-get update && apt-get install -y \
     ros-noetic-mavros \
     ros-noetic-mavros-extras \
+    geographiclib-tools \
     && rm -rf /var/lib/apt/lists/*
+
+# MAVROS' UAS node hard-requires the EGM96-5 geoid grid at
+# /usr/share/GeographicLib/geoids/egm96-5.pgm; without it mavros aborts as a
+# FATAL/REQUIRED process the instant it starts (GeographicLib exception),
+# which takes down the whole SITL roslaunch with it.
+RUN geographiclib-get-geoids egm96-5
 
 ############################################################
 # TF / Navigation / Common ROS packages
