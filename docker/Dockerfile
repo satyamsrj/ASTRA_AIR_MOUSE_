@@ -199,8 +199,16 @@ RUN pip3 install --no-cache-dir \
     torch==2.2.2 torchvision==0.17.2 \
     --index-url https://download.pytorch.org/whl/cu121
 
+# >= 8.3.0 is required for YOLO11/YOLO26 architectures (C3k2 module).
+# PERSON_DETECTION_MODEL_V3 was exported with 8.4.120, so 8.4.x is the safe floor.
+#
+# The `ncnn` package is the CPU inference backend the deployed detector uses
+# (see mission_config.yaml, detection.model). Without it ultralytics will
+# auto-download and pip-install ncnn on first NCNN load, which is a 100+s
+# stall that also fails in an air-gapped competition environment (§7).
 RUN pip3 install --no-cache-dir \
-    ultralytics==8.2.103
+    "ultralytics>=8.4.120,<8.5" \
+    ncnn
 
 ############################################################
 # PX4 Autopilot & ROS Python Dependencies
