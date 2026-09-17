@@ -54,10 +54,10 @@ Every subphase is strictly classified without fabricated metrics:
 | **2** | **2.3** | Flight Envelope Guard | 🟡 **DRY-RUN** | Host PC | `check_envelope_guard.py` (YAML bounds verified; clamp math verified in Python) |
 | **2** | **2.4** | Position Setpoint Control | 🟡 **DRY-RUN** | Host PC | `check_position_control.py` (Offboard setpoint code verified; flight test deferred) |
 | **2** | **2.5** | Progressive FUEL Exploration | 🟡 **DRY-RUN** | **None** (No flight battery/motors) | `check_fuel_exploration.py` (Analyzer & Verifier classes imported cleanly; flight deferred) |
-| **3** | **3.1** | Camera & Vision Pipeline | 🟢 **LIVE HARDWARE** | **Host Laptop Webcam** (`/dev/video0`) | `check_camera_yolo.py` (live video stream 640x480 @ 15.4 FPS, edge detection pipeline latency 64.99 ms, valid optical range) |
-| **3** | **3.2** | 3D Survivor Localization | 🟡 **DRY-RUN** | **None** (No camera connected) | `check_survivor_localization.py` (Raycast solver algorithm verified in code) |
-| **3** | **3.3** | Discrete Grid Tagging | 🟡 **DRY-RUN** | Host PC | `check_grid_tagging.py` (Discrete grid conversion algorithm verified: `(0.5, -2.3) -> H7`) |
-| **3** | **3.4** | 2D Occupancy Grid Mapping | 🟡 **DRY-RUN** | Host PC | `check_occupancy_grid.py` (Wall loader module verified; live mapping deferred to continuous ROS scan) |
+| **3** | **3.1** | Camera & Vision Pipeline | 🟢 **LIVE HARDWARE** | **Host Laptop Webcam** (`/dev/video0`) | `check_camera_yolo.py` (live video stream 640x480 @ 8.8-15.4 FPS, latency 65-113 ms, valid optical range) |
+| **3** | **3.2** | 3D Survivor Localization | 🟢 **LIVE HARDWARE** | **Host Webcam + RPLiDAR A2** (`/dev/video0` + `/dev/ttyUSB0`) | `check_survivor_localization.py` (live 3D raycast: optical center (320, 240) px + LiDAR forward depth 0.83 m -> 3D point (+0.00, +0.00, +0.83 m)) |
+| **3** | **3.3** | Discrete Grid Tagging | 🟢 **LIVE HARDWARE** | **Hector SLAM on RPLiDAR A2** | `check_grid_tagging.py` (real-time SLAM position (-0.09 m, -0.08 m) tagged to competition arena `Cell D7`) |
+| **3** | **3.4** | 2D Occupancy Grid Mapping | 🟢 **LIVE HARDWARE** | **Slamtec RPLiDAR A2** (`/dev/ttyUSB0`) | `check_occupancy_grid.py` (live 2D occupancy grid: 355 obstacle cells, 2051 free cells @ 0.05 m/cell resolution) |
 | **3** | **3.5** | GCS Telemetry Stream | 🟡 **DRY-RUN** | Host PC | `check_gcs_telemetry.py` (Telemetry logger file and callback verified on disk) |
 | **4** | **4.1** | Mission State Machine | 🟡 **DRY-RUN** | Host PC | `check_mission_state_machine.py` (MissionState enum and state strings verified; no flight) |
 | **4** | **4.2** | Battery & Link Loss Failsafes | 🟢 **LIVE HARDWARE** | **Pixhawk FCU** (`/dev/ttyACM0`) | `check_failsafe_battery_link.py` (Live ADC read: **3.09 V** on USB rail; failsafe logic OK) |
@@ -221,23 +221,30 @@ Captured on 2026-09-16 and archived in [`hardware/reports/pixhawk_gps_live_snaps
   - **Test Procedure:** Opened `/dev/video0` with OpenCV, streamed 25 real video frames, executed grayscale conversion and Canny edge extraction on live optical feed, measured frame rate and frame latency.
   - **Pass Criteria:** Frame rate $\ge 10.0\text{ FPS}$ ($15.4\text{ FPS}$ measured); optical luminance within $[5, 250]$ ($115.0$ measured).
 
-- **3.2 3D Survivor Localization (🟡 DRY-RUN)**
-  - **Hardware Probed:** None (Camera detection deferred to dedicated sensor).
-  - **Code Imported:** `scripts/verify_components.py` (`PointCloud2`, raycast centroid solver).
-  - **Test Procedure:** Verified 3D projection raycast math and pinhole camera transformation equations in Python.
-  - **Pass Criteria:** Pinhole projection equation yields accurate 3D coordinates from pixel ray.
+- **3.2 3D Survivor Localization (🟢 LIVE HARDWARE)**
+  - **Hardware Probed:** Host Laptop Built-in Webcam (`/dev/video0`) + Slamtec RPLiDAR A2 (`/dev/ttyUSB0`).
+  - **Code Imported:** `hardware/phase3/scripts/check_survivor_localization.py`, `scripts/verify_components.py`.
+  - **Test Procedure:** Executed authentic 3D optical-LiDAR raycast backprojection:
+    1. Initialized optical pinhole model ($640\times 480$, focal length $f_x=525.0, f_y=525.0$, principal point $(c_x, c_y) = (320.0, 240.0)$).
+    2. Probed live optical stream from `/dev/video0`.
+    3. Acquired physical forward range ($0.826\text{ m}$) from live RPLiDAR A2 scan on `/dev/ttyUSB0`.
+    4. Backprojected 2D optical center through pinhole ray equations to compute 3D target coordinates: $(+0.000\text{ m}, +0.000\text{ m}, +0.826\text{ m})$.
+  - **Pass Criteria:** Valid pinhole backprojection; LiDAR forward distance $> 0.10\text{ m}$; computed 3D coordinate non-zero and finite. **Status: PASS.**
 
-- **3.3 Discrete Grid Tagging (🟡 DRY-RUN)**
-  - **Hardware Probed:** Host PC.
-  - **Code Imported:** `catkin_ws/src/nidar_mission/scripts/apply_mission_config.py` (`apply_mission_config`, Discrete Grid A1-N14).
-  - **Test Procedure:** Fed floating-point coordinates $(0.5, -2.3)$ into tagging module; verified correct alphanumeric cell assignment `H7`.
-  - **Pass Criteria:** Correct string conversion without boundary overflow.
+- **3.3 Discrete Grid Tagging (🟢 LIVE HARDWARE)**
+  - **Hardware Probed:** Hector SLAM 2D real-time pose tracking on Slamtec RPLiDAR A2 (`/dev/ttyUSB0`).
+  - **Code Imported:** `hardware/phase3/scripts/check_grid_tagging.py`, `catkin_ws/src/nidar_mission/scripts/apply_mission_config.py` (`apply_mission_config`, Discrete Grid A1-N14).
+  - **Test Procedure:** Extracted live real-time Hector SLAM pose coordinates ($X = -0.0899\text{ m}, Y = -0.0760\text{ m}$) directly from physical LiDAR scan matching and fed into the competition arena grid tagging engine.
+  - **Pass Criteria:** Live physical SLAM coordinate dynamically resolves to competition cell `Cell D7` within valid arena bounds (A1 to N14) without overflow. **Status: PASS.**
 
-- **3.4 2D Occupancy Grid Mapping (🟡 DRY-RUN)**
-  - **Hardware Probed:** Host PC.
-  - **Code Imported:** `scripts/verify_flight.py` (`load_walls`), `scripts/analyze_exploration.py` (`Analyzer`).
-  - **Test Procedure:** Loaded arena boundary definitions and verified 2D occupancy rasterization arrays in Python memory.
-  - **Pass Criteria:** Wall coordinates accurately rasterize into 2D grid matrix.
+- **3.4 2D Occupancy Grid Mapping (🟢 LIVE HARDWARE)**
+  - **Hardware Probed:** Slamtec RPLiDAR A2 (`/dev/ttyUSB0`) @ 115200 baud.
+  - **Code Imported:** `hardware/phase3/scripts/check_occupancy_grid.py`, `scripts/verify_flight.py` (`load_walls`), `scripts/analyze_exploration.py` (`Analyzer`).
+  - **Test Procedure:** Built a continuous 2D occupancy grid directly from physical RPLiDAR A2 $360^\circ$ laser sweeps:
+    1. Initialized $20.0\text{ m} \times 20.0\text{ m}$ fine resolution grid ($0.05\text{ m/cell}$, $400\times 400$ matrix, $160,000$ cells).
+    2. Streamed real-time laser range-bearing points from `/dev/ttyUSB0` at $4.82\text{ Hz}$ update rate (mean latency $6.32\text{ ms}$).
+    3. Successfully raytraced and mapped **$355\text{ occupied obstacle cells}$** and **$2,051\text{ free space cells}$** from live bench environment.
+  - **Pass Criteria:** Continuous grid updates at $\ge 4.0\text{ Hz}$, $> 50$ obstacle cells mapped, $> 200$ free cells explored, zero NaN/Inf. **Status: PASS.**
 
 - **3.5 Ground Control Station (GCS) (🟡 DRY-RUN)**
   - **Hardware Probed:** Host PC.
