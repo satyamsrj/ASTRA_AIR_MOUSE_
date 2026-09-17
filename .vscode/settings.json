@@ -69,5 +69,22 @@
     "/home/satyam/ros2_ws/install/my_robot_controller/lib/python3.10/site-packages",
     "/opt/ros/humble/lib/python3.10/site-packages",
     "/opt/ros/humble/local/lib/python3.10/dist-packages"
-  ]
+  ],
+  "markdownlint.config": {
+    "default": true,
+    "MD009": false,
+    "MD012": false,
+    "MD013": false,
+    "MD022": false,
+    "MD024": false,
+    "MD025": false,
+    "MD029": false,
+    "MD031": false,
+    "MD032": false,
+    "MD033": false,
+    "MD034": false,
+    "MD036": false,
+    "MD040": false,
+    "MD041": false
+  }
 }
