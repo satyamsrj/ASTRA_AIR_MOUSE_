@@ -1,0 +1,20 @@
+{
+  "include": [
+    "scripts",
+    "hardware",
+    "catkin_ws/src/nidar_mission/scripts"
+  ],
+  "extraPaths": [
+    "scripts",
+    "hardware/phase1/scripts",
+    "hardware/phase2/scripts",
+    "hardware/phase3/scripts",
+    "hardware/phase4/scripts",
+    "catkin_ws/src/nidar_mission/scripts",
+    "/home/satyam/ros2_ws/install/my_robot_controller/lib/python3.10/site-packages",
+    "/opt/ros/humble/lib/python3.10/site-packages",
+    "/opt/ros/humble/local/lib/python3.10/dist-packages"
+  ],
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none"
+}

@@ -61,15 +61,31 @@
   "ros.distro": "humble",
   "ROS2.distro": "humble",
   "python.autoComplete.extraPaths": [
+    "${workspaceFolder}/scripts",
+    "${workspaceFolder}/hardware/phase1/scripts",
+    "${workspaceFolder}/hardware/phase2/scripts",
+    "${workspaceFolder}/hardware/phase3/scripts",
+    "${workspaceFolder}/hardware/phase4/scripts",
+    "${workspaceFolder}/catkin_ws/src/nidar_mission/scripts",
     "/home/satyam/ros2_ws/install/my_robot_controller/lib/python3.10/site-packages",
     "/opt/ros/humble/lib/python3.10/site-packages",
     "/opt/ros/humble/local/lib/python3.10/dist-packages"
   ],
   "python.analysis.extraPaths": [
+    "${workspaceFolder}/scripts",
+    "${workspaceFolder}/hardware/phase1/scripts",
+    "${workspaceFolder}/hardware/phase2/scripts",
+    "${workspaceFolder}/hardware/phase3/scripts",
+    "${workspaceFolder}/hardware/phase4/scripts",
+    "${workspaceFolder}/catkin_ws/src/nidar_mission/scripts",
     "/home/satyam/ros2_ws/install/my_robot_controller/lib/python3.10/site-packages",
     "/opt/ros/humble/lib/python3.10/site-packages",
     "/opt/ros/humble/local/lib/python3.10/dist-packages"
   ],
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingImports": "none",
+    "reportMissingModuleSource": "none"
+  },
   "markdownlint.config": {
     "default": true,
     "MD009": false,
