@@ -20,10 +20,10 @@
     <!-- Robot State Publisher -->
     <node pkg="robot_state_publisher" type="robot_state_publisher" name="nidar_robot_state_publisher" output="screen" />
 
-    <!-- FAST-LIO node -->
-    <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen">
-        <remap from="/Odometry" to="/Fast_LIO/odometry" />
-    </node>
+    <!-- Hector SLAM Node (supersedes FAST-LIO for 2D RPLiDAR A2) -->
+    <include file="$(find nidar_mission)/../../launch/hector_slam/hector_mapping.launch">
+        <arg name="rviz" value="$(arg rviz)" />
+    </include>
 
     <!-- Publish actual drone trajectory path from FAST-LIO odometry -->
     <node pkg="fast_lio" type="flight_path_publisher.py" name="flight_path_publisher" output="screen">

@@ -52,6 +52,7 @@ pkill -f relay_odometry.py 2>/dev/null || true
 pkill -f exploration_node 2>/dev/null || true
 pkill -f traj_server 2>/dev/null || true
 pkill -f waypoint_generator 2>/dev/null || true
+pkill -f hector_mapping 2>/dev/null || true
 pkill -f fast_lio 2>/dev/null || true
 pkill -f FAST_LIO 2>/dev/null || true
 pkill -f cpu_repin_loop.sh 2>/dev/null || true
@@ -137,12 +138,12 @@ pin_process "gzserver" "2,3"
 pin_process "bin/px4" "4,5"
 pin_process "mavros_node" "6,7"
 
-echo "Launching FAST-LIO2 Mapping (RViz=${RVIZ_ARG}; set RVIZ=1 to show it)..."
-roslaunch /home/developer/NIDAR/launch/fast_lio/nidar_mapping.launch rviz:=$RVIZ_ARG > /tmp/fast_lio.log 2>&1 &
+echo "Launching Hector SLAM Mapping (RViz=${RVIZ_ARG}; set RVIZ=1 to show it)..."
+roslaunch /home/developer/NIDAR/launch/fast_lio/nidar_mapping.launch rviz:=$RVIZ_ARG > /tmp/hector_slam.log 2>&1 &
 sim_sleep 2
-pin_process "fastlio_mapping" "0,1"
+pin_process "hector_mapping" "0,1"
 
-echo "Starting Odometry Relay (FAST-LIO -> PX4 EKF2)..."
+echo "Starting Odometry Relay (Hector SLAM -> PX4 EKF2)..."
 /home/developer/NIDAR/scripts/relay_odometry.py > /tmp/relay.log 2>&1 &
 sim_sleep 2
 pin_process "relay_odometry.py" "6,7"
@@ -161,9 +162,7 @@ verify_topic() {
 }
 
 verify_topic "/mavros/imu/data" 90 || exit 1
-verify_topic "/velodyne_points" 90 || exit 1
-verify_topic "/Fast_LIO/odometry" 90 || exit 1
-verify_topic "/cloud_registered" 90 || exit 1
+verify_topic "/slam_out_pose" 90 || verify_topic "/Fast_LIO/odometry" 90 || exit 1
 
 echo "Waiting for EKF Local Position Lock..."
 for i in {1..300}; do

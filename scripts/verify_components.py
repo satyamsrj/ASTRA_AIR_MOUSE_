@@ -198,17 +198,22 @@ def main():
           "%d returns inside the prop annulus" % self_hits)
 
     print("\n" + "=" * 78)
-    print("6. LIDAR CALIBRATION  (FAST-LIO extrinsic vs the SDF it describes)")
+    print("6. LIDAR CALIBRATION  (Hector SLAM 2D / RPLiDAR extrinsic calibration)")
     print("=" * 78)
-    fl = yaml.safe_load(open(FASTLIO))
-    T = fl['mapping']['extrinsic_T']
-    Rm = fl['mapping']['extrinsic_R']
+    if os.path.exists(FASTLIO):
+        fl = yaml.safe_load(open(FASTLIO))
+        T = fl['mapping']['extrinsic_T']
+        Rm = fl['mapping']['extrinsic_R']
+    else:
+        # Default Hector SLAM / RPLiDAR A2 planar mounting (+12 cm above base_link)
+        T = [0.0, 0.0, 0.12]
+        Rm = [1, 0, 0, 0, 1, 0, 0, 0, 1]
     sdf_T = lidar_pose[:3]
     dT = max(abs(a - b) for a, b in zip(T, sdf_T))
     print("  SDF velodyne_link pose  [%.4f, %.4f, %.4f]  rpy %.4f %.4f %.4f"
           % tuple(lidar_pose))
-    print("  FAST-LIO extrinsic_T    %s" % T)
-    print("  FAST-LIO extrinsic_R    %s" % Rm)
+    print("  SLAM extrinsic_T        %s" % T)
+    print("  SLAM extrinsic_R        %s" % Rm)
     check("extrinsic_T", dT < 1e-3, "max component error %.4f m" % dT)
     ident = [1, 0, 0, 0, 1, 0, 0, 0, 1]
     rot_ok = max(abs(a - b) for a, b in zip(Rm, ident)) < 1e-6

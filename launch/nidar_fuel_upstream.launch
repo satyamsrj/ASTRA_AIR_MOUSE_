@@ -8,10 +8,10 @@
   <arg name="init_y" value="0.0"/>
   <arg name="init_z" value="1.4"/>
 
-  <!-- Topics from FAST-LIO2 and MAVROS -->
-  <arg name="odom_topic" value="/Fast_LIO/odometry"/>
-  <arg name="cloud_topic" value="/cloud_registered"/>
-  <arg name="sensor_pose_topic" value="/mavros/vision_pose/pose"/>
+  <!-- Topics from Hector SLAM (or legacy fallback) and MAVROS -->
+  <arg name="odom_topic" default="/slam_out_pose"/>
+  <arg name="cloud_topic" default="/cloud_registered"/>
+  <arg name="sensor_pose_topic" default="/mavros/vision_pose/pose"/>
 
   <!-- Upstream FUEL Exploration Algorithm -->
   <include file="$(find exploration_manager)/launch/algorithm.xml">
