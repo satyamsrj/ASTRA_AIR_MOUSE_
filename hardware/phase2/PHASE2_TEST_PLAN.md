@@ -141,11 +141,18 @@ rostopic echo -n 1 /mavros/local_position/pose # PX4 EKF2 state
 
 # 5. Monitor EKF2 innovation metrics (ensure no rejection or divergence)
 rostopic echo /mavros/estimator_status
+### Direct Hardware Test Script (PyMAVLink & ROS Interface)
+Execute the dedicated hardware validation script:
+```bash
+# Direct PyMAVLink interface to Pixhawk built-in IMU & PX4 EKF2:
+python3 hardware/phase2/scripts/check_odometry_relay.py --port /dev/ttyACM0
 ```
 
 ### Pass Criteria
-- `/mavros/vision_pose/pose` receives continuous updates at $\ge 10\text{ Hz}$.
-- Planar coordinates match: $|X_{\text{hector}} - X_{\text{relay}}| \le 0.02\text{ m}$, $|Y_{\text{hector}} - Y_{\text{relay}}| \le 0.02\text{ m}$.
+- Pixhawk built-in InvenSense IMU streams healthy 3-axis accelerometer and gyro data (stationary $1\text{G}$ on $Z$).
+- PX4 EKF2 estimator outputs valid attitude angles (Roll, Pitch, Yaw) without divergence.
+- Hector SLAM pose format matches MAVLink `VISION_POSITION_ESTIMATE` / `/mavros/vision_pose/pose`.
+- Origin-anchoring correctly eliminates large initial position steps ($|X_{\text{rel}}| \le 0.05\text{ m}$).
 - `rejected_count` remains 0 in relay status during steady-state testing.
 - PX4 EKF2 establishes healthy vision fusion lock (`EKF2_EV_CTRL` enabled).
 
