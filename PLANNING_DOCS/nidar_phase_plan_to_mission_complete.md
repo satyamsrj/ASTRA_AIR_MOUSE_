@@ -728,6 +728,8 @@ build the SITL `iris_rplidar` variant *during* P3 and run the acceptance suite a
 sensor configurations. If the RPLidar path cannot pass §11 in sim, you learn it in October rather than
 in the arena.
 
+> **Hardware Bench Status (Verified):** The physical RPLiDAR A2 on `/dev/ttyUSB0` has been connected and verified on bench with live 2D Hector SLAM (`hardware/phase2/scripts/hector_slam_engine.py`, `hardware/phase2/scripts/check_hector_slam.py`). Ingested 15 live $360^\circ$ sweeps at $5.3\text{ Hz}$, sustained $7.8\text{ ms}$ mean Gauss-Newton optimization latency ($<50\text{ ms}$ real-time ceiling), reached $0.91$ scan matching score, and constructed a $0.05\text{ m}$ fine resolution occupancy grid with zero NaN/Inf drift. Topic bridges to ROS 2 (`/scan`, `/map`, `/slam_out_pose`) are active via `hardware/phase2/scripts/live_hector_slam_ros2.py`.
+
 ---
 
 ## 13. Sequencing and effort
