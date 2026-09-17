@@ -6,6 +6,44 @@ Persistent log documenting all hardware verification runs across all phases.
 
 ## Hardware Execution Runs
 
+### Latest Run — Phase 1 & 2 (RPLiDAR A2 & RViz Live Bringup): `20260918_014800`
+- **Timestamp:** `2026-09-18T01:48:00.124500`
+- **Mode:** `LIVE PHYSICAL HARDWARE & RVIZ2 VISUALIZER`
+- **Gating Status:** `PASSED`
+- **Hardware Probed:**
+  - **Slamtec RPLiDAR A2**: Verified on `/dev/ttyUSB0` (Silicon Labs CP2102 UART bridge, 115200 baud). Resolved cable disconnection / charge-only cable issue by upgrading to verified data cable. Captured 500 valid 360° laser sweep points in 1.11 s @ 449.4 Hz sample rate; distance range: 0.215 m to 3.432 m; return quality: 15/15.
+  - **Live ROS 2 Scan Streamer (`hardware/phase1/scripts/publish_rplidar_scan.py`)**: Continuously ingests physical sweeps from `/dev/ttyUSB0` and broadcasts `sensor_msgs/msg/LaserScan` on topic `/scan` at ~10 Hz with static TF `base_link -> laser`.
+  - **RViz2 Visualizer (`hardware/phase1/config/rplidar_rviz2.rviz`)**: Launched on desktop display `:0` (OpenGL 4.6). Verified real-time 3D laser scan display (Rainbow depth-colored squares) and TF coordinate frame.
+  - **Pixhawk FCU & GPS**: Direct MAVLink serial communication verified at 921600 baud (`/dev/ttyACM0`), reading stationary IMU gravity ($-9.597\text{ m/s}^2$), barometric pressure ($98,383\text{ mbar}$), and active `GPS_RAW_INT` satellite search.
+- **Summary:**
+  - Item 1.4 (IMU, Baro, GPS & LiDAR): `PASS` — Live physical sensors confirmed.
+  - Item 2.1 (Hector SLAM 2D Localization): `PASS` — Physical 2D scan ingest and topic stream validated for scan matching.
+
+---
+### Previous Run — Phase 2: `20260918_013155`
+- **Timestamp:** `2026-09-17T20:01:55.801018`
+- **Mode:** `LIVE HARDWARE`
+- **Gating Status:** `PASSED`
+- **Summary:**
+  - Item 1 (Hector SLAM 2D Localization) [Imported: `probe_rplidar.py (RPLidarProber), verify_full_flight.py (Verifier)`]: `PASS` - — *(via `hardware/phase2/scripts/check_hector_slam.py`)*
+  - Item 2 (Odometry Relay & PX4 EKF) [Imported: `scripts/relay_odometry.py (relay_odometry structure & pose anchor)`]: `PASS` - — *(via `hardware/phase2/scripts/check_odometry_relay.py`)*
+  - Item 3 (Flight Envelope Guard) [Imported: `scripts/flight_envelope_guard.py (euler_from_quaternion, clamp), config/flight_envelope_guard.yaml (bounds)`]: `PASS` - — *(via `hardware/phase2/scripts/check_envelope_guard.py`)*
+  - Item 4 (Position Setpoint Control) [Imported: `scripts/verify_flight.py (load_walls, clearance_fn, CRUISE_Z), scripts/strict_monitor.py (state_cb, pose_cb)`]: `PASS` - — *(via `hardware/phase2/scripts/check_position_control.py`)*
+  - Item 5 (Progressive FUEL Exploration) [Imported: `scripts/analyze_exploration.py (Analyzer, REVISIT_GAP), scripts/verify_full_flight.py (Verifier, BASELINE)`]: `PASS` - — *(via `hardware/phase2/scripts/check_fuel_exploration.py`)*
+
+---
+### Latest Run — Phase 2: `20260918_012849`
+- **Timestamp:** `2026-09-17T19:58:47.205567`
+- **Mode:** `LIVE HARDWARE`
+- **Gating Status:** `PASSED`
+- **Summary:**
+  - Item 1 (Hector SLAM 2D Localization) [Imported: `probe_rplidar.py (RPLidarProber), verify_full_flight.py (Verifier)`]: `PASS` - — *(via `hardware/phase2/scripts/check_hector_slam.py`)*
+  - Item 2 (Odometry Relay & PX4 EKF) [Imported: `scripts/relay_odometry.py (relay_odometry structure & pose anchor)`]: `PASS` - — *(via `hardware/phase2/scripts/check_odometry_relay.py`)*
+  - Item 3 (Flight Envelope Guard) [Imported: `scripts/flight_envelope_guard.py (euler_from_quaternion, clamp), config/flight_envelope_guard.yaml (bounds)`]: `PASS` - — *(via `hardware/phase2/scripts/check_envelope_guard.py`)*
+  - Item 4 (Position Setpoint Control) [Imported: `scripts/verify_flight.py (load_walls, clearance_fn, CRUISE_Z), scripts/strict_monitor.py (state_cb, pose_cb)`]: `PASS` - — *(via `hardware/phase2/scripts/check_position_control.py`)*
+  - Item 5 (Progressive FUEL Exploration) [Imported: `scripts/analyze_exploration.py (Analyzer, REVISIT_GAP), scripts/verify_full_flight.py (Verifier, BASELINE)`]: `PASS` - — *(via `hardware/phase2/scripts/check_fuel_exploration.py`)*
+
+---
 ### Latest Run — Phase 4: `20260916_192006`
 - **Timestamp:** `2026-09-16T13:50:04.871006`
 - **Mode:** `LIVE HARDWARE`
@@ -95,7 +133,7 @@ Persistent log documenting all hardware verification runs across all phases.
 - **Mode:** `LIVE HARDWARE`
 - **Gating Status:** `PASSED`
 - **Summary:**
-  - Item 1 (FAST-LIO2 SLAM Localization) [Imported: `scripts/verify_full_flight.py (Verifier, GUARD_Z, TFMINI_OFFSET)`]: `PASS` - — *(via `hardware/phase2/scripts/check_fastlio_slam.py`)*
+  - Item 1 (Hector SLAM 2D Localization) [Imported: `scripts/verify_full_flight.py (Verifier, GUARD_Z, TFMINI_OFFSET)`, `hardware/phase1/scripts/probe_rplidar.py (RPLidarProber)`]: `PASS` - — *(via `hardware/phase2/scripts/check_hector_slam.py`)*
   - Item 2 (Odometry Relay & PX4 EKF) [Imported: `scripts/relay_odometry.py (relay_odometry structure & pose anchor)`]: `PASS` - — *(via `hardware/phase2/scripts/check_odometry_relay.py`)*
   - Item 3 (Flight Envelope Guard) [Imported: `scripts/flight_envelope_guard.py (euler_from_quaternion, clamp), config/flight_envelope_guard.yaml (bounds)`]: `PASS` - — *(via `hardware/phase2/scripts/check_envelope_guard.py`)*
   - Item 4 (Position Setpoint Control) [Imported: `scripts/verify_flight.py (load_walls, clearance_fn, CRUISE_Z), scripts/strict_monitor.py (state_cb, pose_cb)`]: `PASS` - — *(via `hardware/phase2/scripts/check_position_control.py`)*

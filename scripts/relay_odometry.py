@@ -22,44 +22,61 @@ def state_callback(msg):
     global is_armed
     is_armed = msg.armed
 
+def extract_pose_and_orient(msg):
+    if hasattr(msg, 'pose') and hasattr(msg.pose, 'pose'):
+        # nav_msgs/Odometry
+        return msg.pose.pose.position, msg.pose.pose.orientation
+    elif hasattr(msg, 'pose') and hasattr(msg.pose, 'position'):
+        # geometry_msgs/PoseStamped
+        return msg.pose.position, msg.pose.orientation
+    elif hasattr(msg, 'position') and hasattr(msg, 'orientation'):
+        return msg.position, msg.orientation
+    raise ValueError("Cannot extract pose and orientation from message")
+
 def odometry_callback(msg):
     global origin_initialized, origin_x, origin_y, origin_z
     global last_pub_x, last_pub_y, last_pub_z, last_pub_time
     global rejected_count, healthy_streak
+
+    try:
+        pos, orient = extract_pose_and_orient(msg)
+    except Exception as e:
+        rospy.logwarn_throttle(2.0, "[relay_odometry] Failed to extract pose: %s", e)
+        return
 
     pose_msg = PoseStamped()
     # Update stamp to current ROS time to eliminate latency rejection in PX4 EKF2
     pose_msg.header.stamp = rospy.Time.now()
     pose_msg.header.frame_id = "map"
 
-    pose_msg.pose = msg.pose.pose
+    pose_msg.pose.position.x = pos.x
+    pose_msg.pose.position.y = pos.y
+    pose_msg.pose.position.z = pos.z
+    pose_msg.pose.orientation.x = orient.x
+    pose_msg.pose.orientation.y = orient.y
+    pose_msg.pose.orientation.z = orient.z
+    pose_msg.pose.orientation.w = orient.w
 
     # Anchor external vision to a local origin to avoid large absolute frame offsets.
     if use_relative_origin and not origin_initialized:
-        origin_x = msg.pose.pose.position.x
-        origin_y = msg.pose.pose.position.y
-        origin_z = msg.pose.pose.position.z
+        origin_x = pos.x
+        origin_y = pos.y
+        origin_z = pos.z
         origin_initialized = True
         rospy.loginfo("[relay_odometry] Vision origin initialized at x=%.2f y=%.2f z=%.2f", origin_x, origin_y, origin_z)
 
     if use_relative_origin and origin_initialized:
-        pose_msg.pose.position.x = msg.pose.pose.position.x - origin_x
-        pose_msg.pose.position.y = msg.pose.pose.position.y - origin_y
-        pose_msg.pose.position.z = msg.pose.pose.position.z - origin_z
+        pose_msg.pose.position.x = pos.x - origin_x
+        pose_msg.pose.position.y = pos.y - origin_y
+        pose_msg.pose.position.z = pos.z - origin_z
 
     x = pose_msg.pose.position.x
     y = pose_msg.pose.position.y
 
-    # Absolute sanity envelope, checked against the RAW (pre relative-origin) FAST-LIO position
-    # since that's always in the fixed camera_init/arena frame regardless of use_relative_origin.
-    # Generous margin around the sdf_map box (box_min/max_x=[-0.5,13.5], y=[-7,7]). The jump/speed
-    # checks below only compare against the last PUBLISHED sample, so a slowly-runaway FAST-LIO
-    # estimate (e.g. after scan-matching degrades post-crash) can drift arbitrarily far from the
-    # real arena one small, individually plausible step at a time. Reject outright once the raw
-    # estimate leaves the arena's physical extent, rather than relaying a value PX4's EKF2 will
-    # free-integrate from.
-    raw_x = msg.pose.pose.position.x
-    raw_y = msg.pose.pose.position.y
+    # Absolute sanity envelope, checked against the RAW SLAM (Hector / EV) position
+    # since that's always in the fixed world/arena frame regardless of use_relative_origin.
+    raw_x = pos.x
+    raw_y = pos.y
     if not (-3.5 <= raw_x <= 16.5 and -10.0 <= raw_y <= 10.0):
         rospy.logwarn_throttle(1.0, "[relay_odometry] Rejecting vision sample: raw (%.1f, %.1f) outside arena sanity envelope", raw_x, raw_y)
         rejected_count += 1
@@ -142,10 +159,10 @@ def odometry_callback(msg):
     # Level roll/pitch when on ground to eliminate Preflight Fail: Attitude failure (roll)
     if not is_armed:
         q_raw = [
-            msg.pose.pose.orientation.x,
-            msg.pose.pose.orientation.y,
-            msg.pose.pose.orientation.z,
-            msg.pose.pose.orientation.w
+            orient.x,
+            orient.y,
+            orient.z,
+            orient.w
         ]
         _, _, yaw = euler_from_quaternion(q_raw)
         q_clean = quaternion_from_euler(0.0, 0.0, yaw)
@@ -166,11 +183,15 @@ if __name__ == '__main__':
     vision_speed_reject = rospy.get_param('~vision_speed_reject', 6.0)
     vision_z_step_reject = rospy.get_param('~vision_z_step_reject', 1.0)
     rejection_threshold = rospy.get_param('~rejection_threshold', 15)
+    slam_topic = rospy.get_param('~slam_topic', '/slam_out_pose')
     pub = rospy.Publisher('/mavros/vision_pose/pose', PoseStamped, queue_size=10)
     pub_health = rospy.Publisher('/localization/healthy', Bool, queue_size=5)
     pub_rejected = rospy.Publisher('/localization/rejected_count', Int32, queue_size=5)
     rospy.Subscriber('/mavros/state', State, state_callback, queue_size=1)
+    # Hector SLAM (PoseStamped) as primary input
+    rospy.Subscriber(slam_topic, PoseStamped, odometry_callback, queue_size=10)
+    # Legacy / Fast_LIO fallback
     rospy.Subscriber('/Fast_LIO/odometry', Odometry, odometry_callback, queue_size=10)
-    rospy.loginfo("Relaying /Fast_LIO/odometry to /mavros/vision_pose/pose with EKF2 stability enhancements (relative_origin=%s, z_clamp=[%.2f, %.2f], xy_jump<=%.2f, speed<=%.2f, z_step<=%.2f, reject_threshold=%d)",
-                  str(use_relative_origin), vision_z_min, vision_z_max, vision_xy_jump_reject, vision_speed_reject, vision_z_step_reject, rejection_threshold)
+    rospy.loginfo("Relaying Hector SLAM (%s) to /mavros/vision_pose/pose with EKF2 stability enhancements (relative_origin=%s, z_clamp=[%.2f, %.2f], xy_jump<=%.2f, speed<=%.2f, z_step<=%.2f, reject_threshold=%d)",
+                  slam_topic, str(use_relative_origin), vision_z_min, vision_z_max, vision_xy_jump_reject, vision_speed_reject, vision_z_step_reject, rejection_threshold)
     rospy.spin()

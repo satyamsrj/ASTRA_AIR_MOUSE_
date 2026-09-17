@@ -52,14 +52,14 @@ INPUT ──► INTERFACE ──► HARDWARE RESPONSE ──► TELEMETRY CONFIR
 
 ## Phase 2: Autonomy & Flight Control
 
-### 2.1 FAST-LIO2 SLAM Localization
-- [ ] Output rate $\ge 9\text{ Hz}$ sustained on companion CPU
+### 2.1 Hector SLAM 2D Localization (RPLiDAR A2)
+- [ ] Output rate $\ge 10\text{ Hz}$ sustained on companion CPU
 - [ ] No NaN/Inf values, no sudden coordinate jumps
-- [ ] **Displacement test:** Carrying drone $1.0\text{ m}$ forward $\implies$ FAST-LIO estimates $1.0\text{ m} \pm 0.05\text{ m}$
+- [ ] **Displacement test:** Carrying drone $1.0\text{ m}$ forward $\implies$ Hector SLAM estimates $1.0\text{ m} \pm 0.05\text{ m}$
 
 ### 2.2 Odometry Relay & PX4 EKF
-- [ ] `relay_odometry.py` forwards `/Fast_LIO/odometry` $\to$ `/mavros/vision_pose/pose`
-- [ ] FAST-LIO pose $\approx$ Relay pose $\approx$ `/mavros/local_position/pose`
+- [ ] `relay_odometry.py` forwards Hector `/slam_out_pose` (+ rangefinder $Z$) $\to$ `/mavros/vision_pose/pose`
+- [ ] Hector pose $\approx$ Relay pose $\approx$ `/mavros/local_position/pose`
 - [ ] EKF innovation residuals remain within safe bounds
 
 ### 2.3 Flight Envelope Guard

@@ -72,8 +72,8 @@ class MissionTelemetryLogger:
             'wall_time', 't_elapsed_s', 'mode', 'armed', 'landed_state',
             'ekf_x', 'ekf_y', 'ekf_z',
             'vel_x', 'vel_y', 'vel_z',
-            'ekf_yaw', 'fastlio_x', 'fastlio_y', 'fastlio_z',
-            'ekf_fastlio_divergence_m',
+            'ekf_yaw', 'slam_x', 'slam_y', 'slam_z',
+            'ekf_slam_divergence_m',
             'fuel_target_xc', 'fuel_target_yc', 'fuel_target_zc', 'fuel_target_yaw',
             'fuel_target_age_s', 'fuel_target_changed',
             'guard_last_status',
@@ -84,7 +84,7 @@ class MissionTelemetryLogger:
         self.extended_state = None
         self.pose = None
         self.vel = None
-        self.fastlio_odom = None
+        self.slam_odom = None
         self.last_fuel_cmd = None
         self.last_fuel_cmd_time = None
         self.prev_fuel_target = None
@@ -94,7 +94,8 @@ class MissionTelemetryLogger:
         rospy.Subscriber('/mavros/extended_state', ExtendedState, self._extended_state_cb, queue_size=1)
         rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self._pose_cb, queue_size=1)
         rospy.Subscriber('/mavros/local_position/velocity_local', TwistStamped, self._vel_cb, queue_size=1)
-        rospy.Subscriber('/Fast_LIO/odometry', Odometry, self._fastlio_cb, queue_size=1)
+        rospy.Subscriber('/slam_out_pose', PoseStamped, self._slam_cb, queue_size=1)
+        rospy.Subscriber('/Fast_LIO/odometry', Odometry, self._slam_cb, queue_size=1)
         rospy.Subscriber('/planning/pos_cmd', PositionCommand, self._fuel_cb, queue_size=10)
         rospy.Subscriber('/flight_envelope_guard/status', String, self._guard_status_cb, queue_size=10)
 
@@ -110,8 +111,8 @@ class MissionTelemetryLogger:
     def _vel_cb(self, msg):
         self.vel = msg
 
-    def _fastlio_cb(self, msg):
-        self.fastlio_odom = msg
+    def _slam_cb(self, msg):
+        self.slam_odom = msg
 
     def _fuel_cb(self, msg):
         self.last_fuel_cmd = msg
@@ -144,10 +145,17 @@ class MissionTelemetryLogger:
             else:
                 vx = vy = vz = float('nan')
 
-            if self.fastlio_odom:
-                lx, ly, lz = (self.fastlio_odom.pose.pose.position.x,
-                              self.fastlio_odom.pose.pose.position.y,
-                              self.fastlio_odom.pose.pose.position.z)
+            if self.slam_odom:
+                if hasattr(self.slam_odom, 'pose') and hasattr(self.slam_odom.pose, 'pose'):
+                    lx, ly, lz = (self.slam_odom.pose.pose.position.x,
+                                  self.slam_odom.pose.pose.position.y,
+                                  self.slam_odom.pose.pose.position.z)
+                elif hasattr(self.slam_odom, 'pose') and hasattr(self.slam_odom.pose, 'position'):
+                    lx, ly, lz = (self.slam_odom.pose.position.x,
+                                  self.slam_odom.pose.position.y,
+                                  self.slam_odom.pose.position.z)
+                else:
+                    lx = ly = lz = float('nan')
                 divergence = ((px - lx) ** 2 + (py - ly) ** 2 + (pz - lz) ** 2) ** 0.5
             else:
                 lx = ly = lz = float('nan')
@@ -166,13 +174,13 @@ class MissionTelemetryLogger:
                 fuel_age = float('nan')
                 target_changed = False
 
-            diverge_flag = ' [EKF/FASTLIO DIVERGED!]' if (divergence == divergence and divergence > 0.5) else ''
+            diverge_flag = ' [EKF/SLAM DIVERGED!]' if (divergence == divergence and divergence > 0.5) else ''
             print(
                 f"[Telemetry t+{elapsed:.0f}s] Landed={landed_state} "
-                f"EKF(px4,camera_init)=({px:.2f},{py:.2f},{pz:.2f}) yaw={ekf_yaw:.2f} "
-                f"FastLIO(raw,camera_init)=({lx:.2f},{ly:.2f},{lz:.2f}) diverge={divergence:.2f}m{diverge_flag} "
+                f"EKF(px4)=({px:.2f},{py:.2f},{pz:.2f}) yaw={ekf_yaw:.2f} "
+                f"Hector/SLAM(raw)=({lx:.2f},{ly:.2f},{lz:.2f}) diverge={divergence:.2f}m{diverge_flag} "
                 f"Vel=({vx:.2f},{vy:.2f},{vz:.2f}) Mode={mode} Armed={armed} | "
-                f"FUEL target(camera_init)=({fx:.2f},{fy:.2f},{fz:.2f}) yaw={fyaw:.2f} "
+                f"FUEL target=({fx:.2f},{fy:.2f},{fz:.2f}) yaw={fyaw:.2f} "
                 f"age={fuel_age:.1f}s {'[CHANGED]' if target_changed else '[STATIC]'} | "
                 f"Guard: {self.last_guard_status or 'n/a'}",
                 flush=True,

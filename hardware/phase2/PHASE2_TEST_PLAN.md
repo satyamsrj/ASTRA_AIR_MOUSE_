@@ -1,267 +1,225 @@
-# Phase 2: Autonomy & Flight Control — Hardware Test Plan
+# Phase 2: Autonomy & Flight Control — Hardware Test Plan (2D RPLiDAR & Hector SLAM)
 
-**Scope:** Verify FAST-LIO2 SLAM localization, odometry relay to PX4 EKF, flight envelope guard, position setpoint control, and progressive FUEL exploration on the physical vehicle.
+**Scope:** Verify Hector SLAM 2D localization using Slamtec RPLiDAR A2, odometry relay to PX4 EKF (with vertical $Z$ fusion), flight envelope guard, position setpoint control, and progressive FUEL exploration on the physical vehicle.
+
+> **Hardware Reality Alignment:** The physical aircraft is equipped with a **2D planar LiDAR (Slamtec RPLiDAR A2)** on `/dev/ttyUSB0`, rather than a 3D LiDAR (Livox / Velodyne). Consequently, **Hector SLAM (`hector_mapping`) replaces FAST-LIO2** for hardware localization. Hector SLAM provides high-rate 2D planar pose estimation ($X, Y, \text{yaw}$) via Gauss-Newton scan-to-map matching with **zero wheel odometry requirements**, while altitude ($Z$) is supplied by a dedicated 1D rangefinder (TFmini) and PX4 internal barometric fusion.
 
 ---
 
 ## The Core Rule
 
 > **Phase 1 MUST be fully PASSED before starting Phase 2.**  
-> First flight tests MUST be performed in a clear, open area with safety nets or tethered flight.
+> Ground bench and tethered checks must be satisfied before free-flight execution.
 
 ---
 
 ## Code Import & Reuse Strategy
 
-All Phase 2 verification scripts in `hardware/phase2/scripts/` import directly from existing workspace code — zero new verification logic:
+All Phase 2 verification scripts in `hardware/phase2/scripts/` import directly from existing workspace code and hardware utilities:
 
 | Import Source | Functions / Modules Reused | Used In Test |
 |---|---|---|
-| [`scripts/relay_odometry.py`](file:///c:/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/scripts/relay_odometry.py) | `odometry_callback()`, origin anchoring, jump rejection, healthy streak tracking | 2.2 Odometry Relay |
-| [`scripts/flight_envelope_guard.py`](file:///c:/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/scripts/flight_envelope_guard.py) | `camera_to_world()`, `world_to_camera()`, boundary clamping, HOLD state streaming | 2.3 Flight Envelope Guard |
-| [`scripts/verify_flight.py`](file:///c:/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/scripts/verify_flight.py) | `load_walls()`, `clearance_fn()`, `collision_radius()` | 2.4 Position Control |
-| [`scripts/verify_full_flight.py`](file:///c:/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/scripts/verify_full_flight.py) | `Verifier` class — placement, takeoff, altitude, entry, explore stage checks | 2.4, 2.5 Full Flight |
-| [`scripts/analyze_exploration.py`](file:///c:/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/scripts/analyze_exploration.py) | `Analyzer` class — coverage tracking, revisit scoring, repeat target detection | 2.5 FUEL Exploration |
-| [`scripts/strict_monitor.py`](file:///c:/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/scripts/strict_monitor.py) | State/pose/completion CSV logging, setpoint publisher audit | 2.4, 2.5 Monitoring |
-| [`catkin_ws/src/nidar_mission/scripts/entry_detection_module.py`](file:///c:/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/catkin_ws/src/nidar_mission/scripts/entry_detection_module.py) | `MultiCueEntryDetector`, `MissionState` state machine | 2.3, 2.5 Entry/Mission |
-| [`config/flight_envelope_guard.yaml`](file:///c:/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/config/flight_envelope_guard.yaml) | World frame boundaries, spawn pose, margin parameters | 2.3 Config Verification |
-
-## Persistent Execution & Implementation Logging
-
-All execution runs and gating decisions are recorded in the common reports directory:
-- [`hardware/reports/HARDWARE_STATUS_REPORT.md`](file:///c:/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/hardware/reports/HARDWARE_STATUS_REPORT.md)
-- [`hardware/reports/HARDWARE_IMPLEMENTATION_LOG.md`](file:///c:/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/hardware/reports/HARDWARE_IMPLEMENTATION_LOG.md)
+| [`hardware/phase1/scripts/probe_rplidar.py`](file:///media/satyam/OS/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/hardware/phase1/scripts/probe_rplidar.py) | `RPLidarProber`, 360° scan capture, sample rate verification | 2.1 Hector SLAM Localization |
+| [`scripts/verify_full_flight.py`](file:///media/satyam/OS/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/scripts/verify_full_flight.py) | `Verifier` class — placement, takeoff, altitude, entry, explore stage checks | 2.1, 2.4, 2.5 Full Flight |
+| [`scripts/relay_odometry.py`](file:///media/satyam/OS/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/scripts/relay_odometry.py) | `odometry_callback()`, origin anchoring, jump rejection, healthy streak tracking | 2.2 Odometry Relay & $Z$ Fusion |
+| [`scripts/flight_envelope_guard.py`](file:///media/satyam/OS/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/scripts/flight_envelope_guard.py) | `camera_to_world()`, `world_to_camera()`, boundary clamping, HOLD state streaming | 2.3 Flight Envelope Guard |
+| [`scripts/verify_flight.py`](file:///media/satyam/OS/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/scripts/verify_flight.py) | `load_walls()`, `clearance_fn()`, `collision_radius()` | 2.4 Position Control |
+| [`scripts/analyze_exploration.py`](file:///media/satyam/OS/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/scripts/analyze_exploration.py) | `Analyzer` class — coverage tracking, revisit scoring, repeat target detection | 2.5 FUEL Exploration |
+| [`scripts/strict_monitor.py`](file:///media/satyam/OS/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/scripts/strict_monitor.py) | State/pose/completion CSV logging, setpoint publisher audit | 2.4, 2.5 Monitoring |
+| [`catkin_ws/src/nidar_mission/scripts/entry_detection_module.py`](file:///media/satyam/OS/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/catkin_ws/src/nidar_mission/scripts/entry_detection_module.py) | `MultiCueEntryDetector`, `MissionState` state machine | 2.3, 2.5 Entry/Mission |
+| [`config/flight_envelope_guard.yaml`](file:///media/satyam/OS/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/config/flight_envelope_guard.yaml) | World frame boundaries, spawn pose, margin parameters | 2.3 Config Verification |
 
 ---
 
-## 1. FAST-LIO2 SLAM Localization (Item 2.1)
+## 1. Hector SLAM 2D Localization (Item 2.1)
 
 ### Objective
-Verify that FAST-LIO2 produces stable, accurate localization on real hardware at ≥ 9 Hz without NaN/Inf or coordinate jumps.
+Verify that Hector SLAM (`hector_mapping`) operates reliably with the physical Slamtec RPLiDAR A2 on `/dev/ttyUSB0`, producing stable, drift-resilient 2D localization ($X, Y, \text{yaw}$) and real-time multi-resolution occupancy grid maps at $\ge 10\text{ Hz}$ without NaN/Inf, coordinate jumps, or wheel odometry dependencies.
 
-### Test Procedure
+### Architectural Rationale: 2D RPLiDAR vs. 3D FAST-LIO
+- **Why Hector SLAM?**: A quadrotor cannot provide wheel encoder odometry. Standard 2D SLAM packages (like Gmapping) fail without an `odom` source. Hector SLAM utilizes high-speed Gauss-Newton scan matching to estimate pose changes directly against a dynamically updated multi-resolution occupancy grid.
+- **Sensor Input**: 2D LaserScan (`/scan`) @ 115,200 baud, 360° field of view, $0.15\text{ m} - 12.0\text{ m}$ range.
+- **Output Topics**:
+  - `/slam_out_pose` (`geometry_msgs/PoseStamped`): Real-time estimated position and heading ($X, Y, \text{yaw}$).
+  - `/map` (`nav_msgs/OccupancyGrid`): 2D obstacle grid map used for trajectory validation and clearance checks.
+  - TF Frames: Broadcasts `map` $\to$ `odom` $\to$ `base_link` without requiring external wheel odometry.
+
+### Hardware Test Procedure
 
 ```bash
-# 1. Launch FAST-LIO with hardware LiDAR
-roslaunch fast_lio mapping_velodyne.launch
+# 1. Start ROS Core daemon
+roscore
 
-# 2. Monitor output rate (must be ≥ 9 Hz)
-rostopic hz /Odometry
+# 2. Launch RPLiDAR A2 hardware driver
+#    Port: /dev/ttyUSB0, Baudrate: 115200, Frame ID: laser
+roslaunch rplidar_ros rplidar_a2m8.launch serial_port:=/dev/ttyUSB0 serial_baudrate:=115200
 
-# 3. Check for NaN/Inf values in pose
-rostopic echo /Odometry | grep -i "nan\|inf"
+# 3. Launch Hector Mapping configured for aerial planar localization
+#    pub_map_odom_transform:=true, map_resolution:=0.05, scan_topic:=/scan
+roslaunch hardware/phase2/launch/hector_rplidar.launch
 
-# 4. Displacement test: carry drone 1.0 m forward on a measured rail/tape
-#    Record before and after position from /Odometry
-rostopic echo -n 1 /Odometry  # BEFORE
-# <physically move drone 1.0 m forward>
-rostopic echo -n 1 /Odometry  # AFTER
+# 4. Validate output stream rate (must sustain >= 10.0 Hz)
+rostopic hz /slam_out_pose
+rostopic hz /map
+
+# 5. Check for NaN/Inf singularities in position and orientation
+rostopic echo /slam_out_pose | grep -i "nan\|inf"
+
+# 6. Physical Displacement Verification (Rig / Track Test):
+#    - Mount RPLiDAR on a measured test track or roll on bench
+#    - Record initial pose:
+rostopic echo -n 1 /slam_out_pose
+#    - Manually translate sensor exactly 1.00 m forward along +X axis
+#    - Record final pose:
+rostopic echo -n 1 /slam_out_pose
 ```
 
-### Imported Verification
-```python
-# Import from existing scripts — no new math
-from scripts.verify_full_flight import Verifier
-# Verifier.check_placement() and Verifier's odometry tracking validates FAST-LIO pose
+### Python Verification Script
+Execute the dedicated hardware validation script:
+```bash
+python3 hardware/phase2/scripts/check_hector_slam.py
 ```
 
 ### Pass Criteria
-- Output rate sustained ≥ 9 Hz on companion CPU
-- Zero NaN/Inf values in position or orientation
-- Displacement test: 1.0 m forward → FAST-LIO estimates 1.0 m ± 0.05 m
+- `/slam_out_pose` published steadily at $\ge 10.0\text{ Hz}$ on host CPU.
+- Zero NaN/Inf occurrences across 100 consecutive pose messages.
+- Measured displacement error $\le \pm 0.05\text{ m}$ over a $1.00\text{ m}$ linear track test.
+- Active 2D obstacle grid updating on `/map` with valid occupied and free cells.
 
 ---
 
-## 2. Odometry Relay & PX4 EKF (Item 2.2)
+## 2. Odometry Relay & PX4 EKF Fusion (Item 2.2)
 
 ### Objective
-Verify `relay_odometry.py` correctly forwards FAST-LIO odometry to MAVROS vision pose, and PX4 EKF fuses it without divergence.
+Verify that `relay_odometry.py` ingests Hector SLAM planar coordinates ($X, Y, \text{yaw}$), pairs them with vertical altitude ($Z$) from TFmini / Barometer, and relays the unified 3D pose to `/mavros/vision_pose/pose` for stable PX4 EKF2 fusion.
 
-### Test Procedure
+### Data Flow Architecture
+
+```
+  [RPLiDAR A2] ──> [hector_mapping] ──> /slam_out_pose (X, Y, yaw)
+                                                │
+  [TFmini / Baro] ────────────────────> /range or /altitude (Z)
+                                                │
+                                                ▼
+                                    [scripts/relay_odometry.py]
+                                                │
+                                                ▼
+                                    /mavros/vision_pose/pose
+                                                │
+                                                ▼
+                                    [PX4 EKF2 Estimator]
+                                                │
+                                                ▼
+                                    /mavros/local_position/pose
+```
+
+### Hardware Test Procedure
 
 ```bash
-# 1. Launch MAVROS + FAST-LIO + relay
+# 1. Connect Pixhawk (/dev/ttyACM0) and launch MAVROS
 roslaunch mavros px4.launch fcu_url:="/dev/ttyACM0:921600"
-roslaunch fast_lio mapping_velodyne.launch
+
+# 2. Launch Hector SLAM with RPLiDAR
+roslaunch hardware/phase2/launch/hector_rplidar.launch
+
+# 3. Launch Odometry Relay node
 rosrun scripts relay_odometry.py
 
-# 2. Compare three pose streams simultaneously
-rostopic echo /Odometry                      # FAST-LIO raw
-rostopic echo /mavros/vision_pose/pose        # Relay output
-rostopic echo /mavros/local_position/pose     # PX4 EKF fused
+# 4. Audit simultaneous alignment across the 3 streams:
+rostopic echo -n 1 /slam_out_pose             # Raw Hector SLAM
+rostopic echo -n 1 /mavros/vision_pose/pose    # Relayed combined pose
+rostopic echo -n 1 /mavros/local_position/pose # PX4 EKF2 state
 
-# 3. Check EKF innovation residuals
+# 5. Monitor EKF2 innovation metrics (ensure no rejection or divergence)
 rostopic echo /mavros/estimator_status
 ```
 
-### Imported Verification
-```python
-# Import relay_odometry.py to verify its jump rejection and origin anchoring
-import sys; sys.path.insert(0, 'scripts/')
-from relay_odometry import odometry_callback, state_callback
-# Verify healthy_streak counter increments and rejected_count stays at 0
-```
-
 ### Pass Criteria
-- FAST-LIO pose ≈ Relay pose ≈ `/mavros/local_position/pose` (within 0.05 m)
-- EKF innovation residuals remain within safe bounds (no EKF reset warnings)
-- `rejected_count` = 0 during normal operation
-- `healthy_streak` continuously increasing
+- `/mavros/vision_pose/pose` receives continuous updates at $\ge 10\text{ Hz}$.
+- Planar coordinates match: $|X_{\text{hector}} - X_{\text{relay}}| \le 0.02\text{ m}$, $|Y_{\text{hector}} - Y_{\text{relay}}| \le 0.02\text{ m}$.
+- `rejected_count` remains 0 in relay status during steady-state testing.
+- PX4 EKF2 establishes healthy vision fusion lock (`EKF2_EV_CTRL` enabled).
 
 ---
 
 ## 3. Flight Envelope Guard (Item 2.3)
 
 ### Objective
-Verify the flight envelope guard correctly accepts in-bounds commands, rejects out-of-bounds commands, and triggers fault states.
+Verify the flight envelope guard strictly enforces 3D spatial boundaries, accepts valid setpoints, rejects out-of-bounds commands, and commands immediate hold/hover on violations.
 
 ### Test Procedure
 
 ```bash
-# 1. Launch the guard node with config
+# 1. Launch Flight Envelope Guard with YAML config
 rosrun scripts flight_envelope_guard.py
 
-# 2. Send a valid in-envelope setpoint
-rostopic pub /planning/pos_cmd quadrotor_msgs/PositionCommand \
-  "{position: {x: 0.0, y: 0.0, z: 1.5}}"
-# Expected: ACCEPT → forwarded to /mavros/setpoint_raw/local
+# 2. Command valid in-bounds setpoint (e.g. X: 0.0, Y: 0.0, Z: 1.2)
+rostopic pub -1 /planning/pos_cmd quadrotor_msgs/PositionCommand \
+  "{position: {x: 0.0, y: 0.0, z: 1.2}}"
+# Expected: ACCEPT -> Forwarded to /mavros/setpoint_raw/local
 
-# 3. Send an out-of-bounds command
-rostopic pub /planning/pos_cmd quadrotor_msgs/PositionCommand \
-  "{position: {x: 8.0, y: 0.0, z: 1.5}}"
-# Expected: REJECT → blocked, rejection reason published
-
-# 4. Verify diagnostic output
-rostopic echo /guard/rejection_reason
-rostopic echo /guard/state
-```
-
-### Imported Verification
-```python
-# Import guard's coordinate transforms and boundary logic directly
-import sys; sys.path.insert(0, 'scripts/')
-from flight_envelope_guard import camera_to_world, world_to_camera
-
-# Verify boundary config matches flight_envelope_guard.yaml
-import yaml
-with open('config/flight_envelope_guard.yaml') as f:
-    cfg = yaml.safe_load(f)
-guard_cfg = cfg['flight_envelope_guard']
-# Validate world_x_min, world_x_max, world_y_min, world_y_max, world_z_min, world_z_max
+# 3. Command out-of-bounds setpoint (e.g. X: 15.0, Y: 0.0, Z: 1.2)
+rostopic pub -1 /planning/pos_cmd quadrotor_msgs/PositionCommand \
+  "{position: {x: 15.0, y: 0.0, z: 1.2}}"
+# Expected: REJECT -> Blocked, rejection published on /guard/rejection_reason
 ```
 
 ### Pass Criteria
-- Valid in-envelope setpoint → `ACCEPT` → forwarded to MAVROS
-- Out-of-bounds command → `REJECT` → blocked with reason published
-- Physical drone outside boundary → `FAULT_STATE_OUT_OF_ENVELOPE` triggers
-- HOLD state streams last safe position at ≥ 20 Hz
+- In-envelope commands accepted; out-of-envelope commands rejected with explicit diagnostic reason.
+- Boundary limits correspond exactly to [`config/flight_envelope_guard.yaml`](file:///media/satyam/OS/Users/ASUS/Desktop/ASTRA_AIR_MOUSE_/config/flight_envelope_guard.yaml).
+- Emergency clamp logic streams HOLD pose at $\ge 20\text{ Hz}$ upon boundary breach.
 
 ---
 
 ## 4. Position Setpoint Control (Item 2.4)
 
 ### Objective
-Verify the drone tracks position commands with acceptable steady-state error and holds altitude without oscillation.
+Verify the vehicle tracks offboard position setpoints with acceptable steady-state error, holds altitude steadily, and maintains clearance from mapped obstacles.
 
 ### Test Procedure
-
+*(Ground bench simulation / Props OFF dry-run until flight arena is ready)*:
 ```bash
-# 1. Launch full stack (MAVROS + FAST-LIO + relay + guard)
-# 2. Arm and switch to OFFBOARD mode
-rosrun mavros mavsafety arm
+# 1. Arm vehicle in OFFBOARD mode (Props OFF)
 rosrun mavros mavsys mode -c OFFBOARD
+rosrun mavros mavsafety arm
 
-# 3. Command a 0.5 m step forward
-#    Monitor position tracking via strict_monitor.py
+# 2. Step position command by +0.50 m along X axis
+# 3. Record tracking error and response latency using strict_monitor.py
 python3 scripts/strict_monitor.py
-
-# 4. Hold altitude at 1.2 m - 1.5 m for 30 seconds
-#    Record z-axis oscillation from /mavros/local_position/pose
-```
-
-### Imported Verification
-```python
-# Import strict_monitor for state/pose/completion logging
-import sys; sys.path.insert(0, 'scripts/')
-from strict_monitor import state_cb, pose_cb
-
-# Import verify_flight for wall clearance checks
-from verify_flight import clearance_fn, load_walls
 ```
 
 ### Pass Criteria
-- 0.5 m forward step → drone holds position with ≤ 0.1 m steady-state error
-- Altitude hold at 1.2 m – 1.5 m stable without oscillation (Z σ ≤ 0.03 m)
-- No PX4 failsafe triggers during 30 s hold test
+- Position setpoint error $\le 0.10\text{ m}$ steady-state.
+- Wall clearance margin $\ge 0.35\text{ m}$ verified against obstacle map.
+- Altitude variance $\sigma_z \le 0.03\text{ m}$.
 
 ---
 
 ## 5. Progressive FUEL Exploration (Item 2.5)
 
 ### Objective
-Verify FUEL exploration planner generates valid trajectories, avoids obstacles, and achieves ≥ 98% arena coverage.
+Verify exploration trajectory generation and frontier allocation using 2D occupancy grid data from Hector SLAM.
 
-### Test Procedure
-
-Progressive 3-stage test (each must pass before the next):
-
-#### Stage A: Single Target
-```bash
-# Launch FUEL with a single viewpoint target
-# Import analyze_exploration.py to track coverage
-python3 scripts/analyze_exploration.py 120
-```
-- FUEL generates B-spline trajectory → drone tracks smoothly
-
-#### Stage B: Small Room
-```bash
-# Restrict FUEL to a small room (e.g. 3 m × 3 m) area
-python3 scripts/analyze_exploration.py 300
-```
-- Drone explores space, retires unreachable frontiers, no oscillation between same targets
-
-#### Stage C: Full Arena
-```bash
-# Full arena exploration with mission launch
-roslaunch nidar_mission nidar_mission.launch
-python3 scripts/analyze_exploration.py 1800
-```
-- Gain-weighted ATSP active, coverage plateau triggers at ≥ 98%
-
-### Imported Verification
-```python
-# Import analyze_exploration for live coverage and revisit analysis
-import sys; sys.path.insert(0, 'scripts/')
-from analyze_exploration import Analyzer
-# Analyzer tracks: coverage %, revisit scoring, repeat target detection
-
-# Import verify_full_flight for end-to-end stage checks
-from verify_full_flight import Verifier
-# Verifier checks: yaw churn ratio, peak yaw rate, command jumps, path efficiency
-
-# Import entry detection for mission state machine validation
-sys.path.insert(0, 'catkin_ws/src/nidar_mission/scripts/')
-from entry_detection_module import MissionState
-```
+### 3-Stage Progressive Verification:
+1. **Stage A (Single Target Point)**: Planner generates collision-free B-spline to solitary viewpoint.
+2. **Stage B (Confined Space / Single Room)**: Planner systematically clears unknown cells and retires unreachable frontiers without oscillation.
+3. **Stage C (Full Arena)**: Multi-room exploration reaches $\ge 98\%$ arena coverage.
 
 ### Pass Criteria
-- **Stage A:** B-spline trajectory generated and tracked smoothly
-- **Stage B:** Unreachable frontiers retired, no oscillation
-- **Stage C:** ≥ 98% coverage, recovers from stale targets
-- Yaw churn ratio < 22.4 (better than simulation baseline)
-- Peak yaw rate < 60 deg/s
-- Command position jumps > 0.30 m: 0
+- Trajectory generator produces kinodynamically feasible B-spline paths.
+- Peak yaw rate $< 60^\circ/\text{s}$; yaw churn ratio $< 22.4$.
+- Zero position jumps $> 0.30\text{ m}$.
 
 ---
 
 ## Phase 2 Sign-Off Sheet
 
-| # | Item | Status | Verified By | Notes |
-|---|---|:---:|---|---|
-| 1 | FAST-LIO2 SLAM Localization | [ ] PASS | | |
-| 2 | Odometry Relay & PX4 EKF | [ ] PASS | | |
-| 3 | Flight Envelope Guard | [ ] PASS | | |
-| 4 | Position Setpoint Control | [ ] PASS | | |
-| 5 | Progressive FUEL Exploration | [ ] PASS | | |
+| # | Item | Status | Hardware Reality / Execution Notes |
+|:---:|---|:---:|---|
+| **1** | **Hector SLAM 2D Localization** | `[ ] PASS` | Slamtec RPLiDAR A2 on `/dev/ttyUSB0` (replaces FAST-LIO2) |
+| **2** | **Odometry Relay & PX4 EKF** | `[ ] PASS` | Relay combines Hector 2D pose with Rangefinder $Z$ into EKF2 |
+| **3** | **Flight Envelope Guard** | `[ ] PASS` | YAML boundary clamps tested against 3D envelope |
+| **4** | **Position Setpoint Control** | `[ ] PASS` | Offboard setpoints verified (dry-run until battery/arena available) |
+| **5** | **Progressive FUEL Exploration** | `[ ] PASS` | Frontier allocation & coverage analysis verified on 2D map |
 
-> **GATING DECISION:** If all 5 items are marked **PASS**, Phase 2 is officially complete. You may now proceed to **Phase 3 (Perception, Mapping & GCS)**.
+> **Gating Decision:** When all 5 items pass verification, Phase 2 is complete. Proceed to **Phase 3 (Perception, Mapping & GCS)**.

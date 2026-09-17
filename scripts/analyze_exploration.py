@@ -54,6 +54,7 @@ class Analyzer(object):
         self.last_xy = None
 
         rospy.Subscriber('/sdf_map/coverage', Float64MultiArray, self.cov_cb, queue_size=2)
+        rospy.Subscriber('/slam_out_pose', PoseStamped, self.odom_cb, queue_size=20)
         rospy.Subscriber('/Fast_LIO/odometry', Odometry, self.odom_cb, queue_size=20)
         rospy.Subscriber('/exploration/next_view', PoseStamped, self.view_cb, queue_size=20)
         rospy.Subscriber('/edm/mission_state', String, self.state_cb, queue_size=5)
@@ -94,7 +95,12 @@ class Analyzer(object):
         if self.t0 is None:
             self.t0 = rospy.Time.now().to_sec()
         t = self.now()
-        p = m.pose.pose.position
+        if hasattr(m, 'pose') and hasattr(m.pose, 'pose'):
+            p = m.pose.pose.position
+        elif hasattr(m, 'pose') and hasattr(m.pose, 'position'):
+            p = m.pose.position
+        else:
+            return
         self.pos = (p.x, p.y)
         if self.last_xy is not None:
             self.path_len += math.hypot(p.x - self.last_xy[0], p.y - self.last_xy[1])

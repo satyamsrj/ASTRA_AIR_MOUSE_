@@ -118,12 +118,17 @@ class MultiCueEntryDetector:
             inst_rate = 1.0 / dt if dt > 0 else 0.0
             self.odom_rate_hz = 0.8 * self.odom_rate_hz + 0.2 * inst_rate if self.odom_rate_hz > 0 else inst_rate
 
-        self.last_odom_time = now
+        if hasattr(odom_msg, 'pose') and hasattr(odom_msg.pose, 'pose'):
+            pos = odom_msg.pose.pose.position
+        elif hasattr(odom_msg, 'pose') and hasattr(odom_msg.pose, 'position'):
+            pos = odom_msg.pose.position
+        else:
+            return
 
         curr_p = np.array([
-            odom_msg.pose.pose.position.x,
-            odom_msg.pose.pose.position.y,
-            odom_msg.pose.pose.position.z
+            pos.x,
+            pos.y,
+            pos.z
         ])
 
         if self.last_pose is not None:
@@ -485,6 +490,7 @@ class EntryDetectionModuleNode:
         # Subscribers
         rospy.Subscriber('/mavros/state', State, self.state_cb)
         rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.pose_cb)
+        rospy.Subscriber('/slam_out_pose', PoseStamped, self.odom_cb)
         rospy.Subscriber('/Fast_LIO/odometry', Odometry, self.odom_cb)
         rospy.Subscriber('/cloud_registered', PointCloud2, self.cloud_cb)
         rospy.Subscriber('/exploration_completed', Bool, self.completed_cb)

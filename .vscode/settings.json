@@ -57,5 +57,17 @@
     "logs/**": true,
     "**/__pycache__/**": true
   },
-  "search.followSymlinks": false
+  "search.followSymlinks": false,
+  "ros.distro": "humble",
+  "ROS2.distro": "humble",
+  "python.autoComplete.extraPaths": [
+    "/home/satyam/ros2_ws/install/my_robot_controller/lib/python3.10/site-packages",
+    "/opt/ros/humble/lib/python3.10/site-packages",
+    "/opt/ros/humble/local/lib/python3.10/dist-packages"
+  ],
+  "python.analysis.extraPaths": [
+    "/home/satyam/ros2_ws/install/my_robot_controller/lib/python3.10/site-packages",
+    "/opt/ros/humble/lib/python3.10/site-packages",
+    "/opt/ros/humble/local/lib/python3.10/dist-packages"
+  ]
 }

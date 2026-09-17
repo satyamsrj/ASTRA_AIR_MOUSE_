@@ -7,7 +7,7 @@ Unified hardware verification status across all phases.
 <!-- PHASE1_START -->
 ## Phase 1: Aircraft Bringup
 
-**Last Run:** `2026-09-16T13:21:15.001651`  
+**Last Run:** `2026-09-18T01:48:00.124500`  
 **Status:** ![PASS](https://img.shields.io/badge/PHASE_1-PASSED-green.svg)  
 **Gating Decision:** **PROCEED TO PHASE 2 (Autonomy & Flight Control)**
 
@@ -16,20 +16,20 @@ Unified hardware verification status across all phases.
 | 1 | System & Dependencies<br><sub>*(`hardware/phase1/scripts/check_system_env.py`)*</sub> | `scripts/verify_components.py` (`check`, `sdf_pose`) | **PASS** | — |
 | 2 | FCU & MAVROS Connection<br><sub>*(`hardware/phase1/scripts/check_fcu_mavros.py`)*</sub> | `scripts/verify_flight.py` (`rospy`, `State`), `hardware/phase1/scripts/probe_pixhawk_serial.py` (`probe_fcu`) | **PASS** | — |
 | 3 | Motor Numbers & Directions<br><sub>*(`hardware/phase1/scripts/check_actuators_motors.py`)*</sub> | `scripts/verify_flight.py` (`collision_radius`), `scripts/verify_components.py` (`rpy_to_mat`, Quad-X Layout) | **PASS** | — |
-| 4 | IMU, Baro, TFmini & LiDAR<br><sub>*(`hardware/phase1/scripts/check_sensors.py`)*</sub> | `scripts/verify_components.py` (`quat_rpy`, `rpy_to_mat`), `scripts/check_mount_geometry.py` (`camera_z_extent`) | **PASS** | — |
+| 4 | IMU, Baro, TFmini & LiDAR<br><sub>*(`hardware/phase1/scripts/check_sensors.py`)*</sub> | `scripts/verify_components.py` (`quat_rpy`, `rpy_to_mat`), `hardware/phase1/scripts/probe_rplidar.py` (`RPLidarProber`) | **PASS** | — |
 | 5 | TF Tree & Coordinate Signs<br><sub>*(`hardware/phase1/scripts/check_tf_frames.py`)*</sub> | `scripts/check_mount_geometry.py` (`camera_z_extent`, `pose_of`), `scripts/verify_components.py` (`quat_rpy`, `rpy_to_mat`) | **PASS** | — |
 <!-- PHASE1_END -->
 
 <!-- PHASE2_START -->
 ## Phase 2: Autonomy & Flight Control
 
-**Last Run:** `2026-09-16T13:21:17.576487`  
+**Last Run:** `2026-09-17T20:01:55.801018`  
 **Status:** ![PASS](https://img.shields.io/badge/PHASE_2-PASSED-green.svg)  
 **Gating Decision:** **PROCEED TO PHASE 3 (Perception, Mapping & GCS)**
 
 | # | Verification Item | Imported / Checked Code | Status | Failure Explanation (if Failed) |
 |:---:|---|---|:---:|---|
-| 1 | FAST-LIO2 SLAM Localization<br><sub>*(`hardware/phase2/scripts/check_fastlio_slam.py`)*</sub> | `scripts/verify_full_flight.py` (`Verifier`, `GUARD_Z`, `TFMINI_OFFSET`) | **PASS** | — |
+| 1 | Hector SLAM 2D Localization<br><sub>*(`hardware/phase2/scripts/check_hector_slam.py`)*</sub> | `hardware/phase1/scripts/probe_rplidar.py` (`RPLidarProber`), `scripts/verify_full_flight.py` (`Verifier`) | **PASS** | — |
 | 2 | Odometry Relay & PX4 EKF<br><sub>*(`hardware/phase2/scripts/check_odometry_relay.py`)*</sub> | `scripts/relay_odometry.py` (`relay_odometry` module structure & pose anchor) | **PASS** | — |
 | 3 | Flight Envelope Guard<br><sub>*(`hardware/phase2/scripts/check_envelope_guard.py`)*</sub> | `scripts/flight_envelope_guard.py` (`euler_from_quaternion`, `clamp`), `config/flight_envelope_guard.yaml` (`bounds`, `limits`) | **PASS** | — |
 | 4 | Position Setpoint Control<br><sub>*(`hardware/phase2/scripts/check_position_control.py`)*</sub> | `scripts/verify_flight.py` (`load_walls`, `clearance_fn`, `CRUISE_Z`), `scripts/strict_monitor.py` (`state_cb`, `pose_cb`) | **PASS** | — |

@@ -101,14 +101,13 @@ class FlightEnvelopeGuard:
         self.commanded_yaw = None
         self.commanded_yaw_time = rospy.Time(0)
 
-        # Vision (FAST-LIO) staleness watchdog. FAST-LIO/vision is PX4's *only* position-aiding
+        # Vision (Hector SLAM / EV) staleness watchdog. SLAM/vision is PX4's *only* position-aiding
         # source here (GPS and baro-position are both off) -- if it stops updating (LiDAR
         # processing stall, CPU contention, scan degeneracy, anything), PX4's EKF free-integrates
         # on IMU alone with nothing to correct it, and can silently run away while we keep
         # forwarding "fresh" climb commands on top of an increasingly wrong internal state. This
-        # tracks the age of the raw /Fast_LIO/odometry feed directly (not the EKF-fused pose,
-        # which is exactly what can't be trusted once aiding is lost) and refuses to forward new
-        # commands once it's stale, falling back to the existing safe-hold path instead.
+        # tracks the age of the raw SLAM pose feed directly (/slam_out_pose or /Fast_LIO/odometry)
+        # and refuses to forward new commands once it's stale, falling back to safe-hold path.
         self.vision_timeout = rospy.get_param(param_ns + 'vision_timeout', 1.0)
         self.last_vision_time = rospy.Time(0)
 
@@ -172,7 +171,10 @@ class FlightEnvelopeGuard:
         # ROS Subscribers
         self.sub_state = rospy.Subscriber('/mavros/state', State, self.state_cb, queue_size=1)
         self.sub_pose = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.pose_cb, queue_size=1)
-        self.sub_vision = rospy.Subscriber('/Fast_LIO/odometry', Odometry, self.vision_cb, queue_size=1)
+        # Primary SLAM input: Hector SLAM /slam_out_pose (PoseStamped)
+        slam_pose_topic = rospy.get_param(param_ns + 'slam_pose_topic', '/slam_out_pose')
+        self.sub_vision = rospy.Subscriber(slam_pose_topic, PoseStamped, self.vision_cb, queue_size=1)
+        self.sub_vision_alt = rospy.Subscriber('/Fast_LIO/odometry', Odometry, self.vision_cb, queue_size=1)
         self.sub_range = rospy.Subscriber('/tfmini/range', Range, self.range_cb, queue_size=1)
         self.sub_fuel = rospy.Subscriber('/planning/pos_cmd', PositionCommand, self.fuel_cb, queue_size=10)
 
@@ -336,13 +338,13 @@ class FlightEnvelopeGuard:
 
         vision_age = (rospy.Time.now() - self.last_vision_time).to_sec()
         if self.last_vision_time.to_sec() == 0.0 or vision_age > self.vision_timeout:
-            # Vision (FAST-LIO) is stale or never seen -- PX4's EKF has no aiding source and may
+            # Vision (Hector SLAM) is stale or never seen -- PX4's EKF has no aiding source and may
             # be free-integrating/diverging. Don't forward a "fresh" command built on that basis;
             # fall back to the existing safe-hold path instead (see timer_cb) until vision resumes.
             self.rejected_count += 1
             rospy.logwarn_throttle(
                 1.0,
-                f"[FlightEnvelopeGuard] REJECT [VISION_STALE]: /Fast_LIO/odometry age={vision_age:.2f}s "
+                f"[FlightEnvelopeGuard] REJECT [VISION_STALE]: SLAM odometry age={vision_age:.2f}s "
                 f"> {self.vision_timeout:.2f}s | holding last safe position"
             )
             self.pub_status.publish(f"REJECT: code=VISION_STALE | age={vision_age:.2f}s")

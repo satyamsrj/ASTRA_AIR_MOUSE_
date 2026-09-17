@@ -7,7 +7,7 @@
 ## The Core Rule
 
 > **Phase 2 MUST be fully PASSED before starting Phase 3.**  
-> FAST-LIO SLAM, odometry relay, and position control must be verified working on real hardware before adding perception and mapping layers.
+> Hector SLAM, odometry relay, and position control must be verified working on real hardware before adding perception and mapping layers.
 
 ---
 
@@ -55,8 +55,8 @@ roslaunch nidar_mission yolo_detector.launch
 # 4. Check detector rate (must be ≥ 5 Hz)
 rostopic hz /detections
 
-# 5. While YOLO is running, verify FAST-LIO is NOT degraded
-rostopic hz /Odometry  # Must still be ≥ 9 Hz
+# 5. While YOLO is running, verify Hector SLAM is NOT degraded
+rostopic hz /slam_out_pose  # Must still be ≥ 9 Hz
 ```
 
 ### Imported Verification
@@ -80,7 +80,7 @@ rostopic echo /detections --filter "len(m.bounding_boxes) > 0"
 ### Pass Criteria
 - Camera stream publishing at ≥ 15 FPS
 - YOLO detector runs at ≥ 5 Hz onboard
-- FAST-LIO localization rate remains ≥ 9 Hz (no CPU starvation)
+- Hector SLAM localization rate remains ≥ 9 Hz (no CPU starvation)
 - Zero false positives on plain walls and background obstacles
 
 ---
@@ -96,7 +96,7 @@ Verify that bounding box centroids are correctly raycasted against the registere
 # 1. Place known test targets (mannequins / heat signatures) at surveyed positions
 #    Ground truth positions measured with tape / laser to ± 0.01 m
 
-# 2. Launch full perception stack (FAST-LIO + Camera + YOLO + 3D Localizer)
+# 2. Launch full perception stack (Hector SLAM + Camera + YOLO + 3D Localizer)
 
 # 3. Record detected 3D positions
 rostopic echo /survivor_positions
@@ -173,8 +173,8 @@ Verify that the 3D point cloud is correctly sliced, published as `nav_msgs/Occup
 ### Test Procedure
 
 ```bash
-# 1. Launch full SLAM + mapping stack
-roslaunch fast_lio mapping_velodyne.launch
+# 1. Launch Hector SLAM + 2D mapping stack
+roslaunch hardware/phase2/launch/hector_rplidar.launch
 
 # 2. Verify point cloud Z-slicing (0.3 m ≤ Z ≤ 1.9 m)
 #    Only points within this band should appear in the 2D grid

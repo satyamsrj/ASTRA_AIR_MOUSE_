@@ -60,6 +60,7 @@ class Verifier(object):
         rospy.Subscriber('/tfmini/range', Range, self.rng_cb, queue_size=1)
         rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.mav_cb, queue_size=1)
         rospy.Subscriber('/mavros/state', State, self.state_cb, queue_size=1)
+        rospy.Subscriber('/slam_out_pose', PoseStamped, self.odom_cb, queue_size=50)
         rospy.Subscriber('/Fast_LIO/odometry', Odometry, self.odom_cb, queue_size=50)
 
     def gz_cb(self, m):
@@ -79,8 +80,14 @@ class Verifier(object):
         self.mode = m.mode
 
     def odom_cb(self, m):
-        p = m.pose.pose.position
-        q = m.pose.pose.orientation
+        if hasattr(m, 'pose') and hasattr(m.pose, 'pose'):
+            p = m.pose.pose.position
+            q = m.pose.pose.orientation
+        elif hasattr(m, 'pose') and hasattr(m.pose, 'position'):
+            p = m.pose.position
+            q = m.pose.orientation
+        else:
+            return
         yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
         self.odom.append((rospy.Time.now().to_sec(), p.x, p.y, yaw))
 

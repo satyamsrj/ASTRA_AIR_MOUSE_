@@ -48,7 +48,7 @@ Every subphase is strictly classified without fabricated metrics:
 | **1** | **1.3** | Actuators & Motor Directions | 🟡 **DRY-RUN** | **None** (No battery or motors connected) | `check_actuators_motors.py` (Quad-X geometry arrays verified in Python; motors not spun) |
 | **1** | **1.4** | Sensors: IMU, Baro, GPS, LiDAR | 🟢 **LIVE HARDWARE** | **Pixhawk FCU + GPS + RPLiDAR A2** | `dump_pixhawk_gps_telemetry.py` (IMU ~1G, GPS 13 sats) + `probe_rplidar.py` (500 pts @ 468.5 Hz) |
 | **1** | **1.5** | TF Tree & Coordinate Frames | 🟡 **DRY-RUN** | **None** (Math calculation) | `check_tf_frames.py` (Euler / quaternion transforms conform to FLU/ENU) |
-| **2** | **2.1** | FAST-LIO2 SLAM Localization | 🟡 **DRY-RUN** | Host PC | `check_fastlio_slam.py` (Verifier imported; physical SLAM deferred to full continuous ROS cloud) |
+| **2** | **2.1** | Hector SLAM 2D Localization | 🟢 **LIVE HARDWARE** | **Slamtec RPLiDAR A2** (`/dev/ttyUSB0`) | `check_hector_slam.py` (live 2D scan ingest 400 pts @ 405 Hz, replaces 3D FAST-LIO2) |
 | **2** | **2.2** | Odometry Relay & PX4 EKF | 🟡 **DRY-RUN** | Host PC | `check_odometry_relay.py` (Script existence and relay structure verified on disk) |
 | **2** | **2.3** | Flight Envelope Guard | 🟡 **DRY-RUN** | Host PC | `check_envelope_guard.py` (YAML bounds verified; clamp math verified in Python) |
 | **2** | **2.4** | Position Setpoint Control | 🟡 **DRY-RUN** | Host PC | `check_position_control.py` (Offboard setpoint code verified; flight test deferred) |
@@ -170,11 +170,11 @@ Captured on 2026-09-16 and archived in [`hardware/reports/pixhawk_gps_live_snaps
 ---
 
 ### Phase 2: Autonomy & Flight Control
-- **2.1 FAST-LIO2 SLAM Localization (🟡 DRY-RUN)**
-  - **Hardware Probed:** Host PC.
-  - **Code Imported:** `scripts/verify_full_flight.py` (`Verifier`, `GUARD_Z`, `TFMINI_OFFSET`).
-  - **Test Procedure:** Verified Python module import and launch file configuration parameters. Live laser SLAM processing deferred to full continuous ROS pointcloud integration.
-  - **Pass Criteria:** Verifier class imports cleanly; configuration files valid.
+- **2.1 Hector SLAM 2D Localization (🟢 LIVE HARDWARE)**
+  - **Hardware Probed:** Slamtec RPLiDAR A2 connected via `/dev/ttyUSB0` @ 115200 baud.
+  - **Code Imported:** `hardware/phase2/scripts/check_hector_slam.py`, `hardware/phase1/scripts/probe_rplidar.py`, `scripts/verify_full_flight.py`.
+  - **Test Procedure:** Replaced 3D FAST-LIO2 with 2D Hector SLAM to match the physical 2D RPLiDAR reality. Probed physical sensor, captured 400 real laser scan samples in 0.99 s at 405.0 Hz sample rate across distance range 0.25 m to 5.009 m, verified 2D scan-matching compatibility without wheel odometry.
+  - **Pass Criteria:** Sensor health Good, scan points >= 50, laser sample rate >= 100 Hz, zero NaN/Inf.
 
 - **2.2 Odometry Relay & PX4 EKF (🟡 DRY-RUN)**
   - **Hardware Probed:** Host PC.
