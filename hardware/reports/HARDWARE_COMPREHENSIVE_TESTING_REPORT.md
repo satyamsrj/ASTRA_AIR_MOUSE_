@@ -183,6 +183,13 @@ Captured on 2026-09-16 and archived in [`hardware/reports/pixhawk_gps_live_snaps
     6. Mapped **$368\text{ occupied obstacle cells}$** and **$1,883\text{ free space cells}$**.
     7. Estimated real-time displacement trajectory: $X = -0.1101\text{ m}$, $Y = -0.0990\text{ m}$, $\text{Yaw} = +0.99^\circ$ with zero NaN/Inf singularities.
   - **Pass Criteria:** Sensor health Good, scan rate $\ge 5\text{ Hz}$, mean SLAM latency $< 50\text{ ms}$, scan matching score $\ge 0.60$, zero NaN/Inf, $> 50$ cells mapped. **Status: PASS.**
+  - **Hector SLAM Architectural Trade-Off Analysis (Advantages & Disadvantages):**
+    - *Advantage — Zero Odometry Dependency:* Uses Gauss-Newton scan matching directly into a multi-resolution occupancy grid, eliminating the need for wheel encoders or IMU initialization.
+    - *Advantage — Low CPU Utilization:* Benchmarked at only $6.8\text{ – }13.3\text{ ms / sweep}$ ($< 15\%$ CPU), leaving ample compute headroom for YOLO detection and FUEL path planning.
+    - *Advantage — Direct 2D Map Generation:* Natively outputs `/map` (`nav_msgs/OccupancyGrid`) for immediate navigation without heavy 3D point cloud voxel slicing.
+    - *Disadvantage / Limitation — Planar 2D Constraint:* Estimates planar coordinates ($X, Y, \text{yaw}$) only; vertical altitude ($Z$) is mitigated by fusing 1D TFmini Rangefinder / Barometer data in `relay_odometry.py`.
+    - *Disadvantage / Limitation — Scan Plane Tilt Sensitivity:* Vehicle tilt $> 20^\circ$ tilts the 2D scan plane; mitigated by bounding drone cruising tilt angle and fusing Pixhawk EKF2 attitude angles.
+    - *Disadvantage / Limitation — Longitudinal Corridor Drift:* Long featureless corridors lack perpendicular features; mitigated by EKF2 multi-sensor fusion and origin-anchoring.
 
 - **2.2 Odometry Relay & PX4 EKF (🟢/🟡 LIVE HARDWARE & FILTERING AUDIT)**
   - **Hardware Probed:** Pixhawk FCU on `/dev/ttyACM0` (built-in InvenSense IMU & PX4 EKF2 onboard estimator).

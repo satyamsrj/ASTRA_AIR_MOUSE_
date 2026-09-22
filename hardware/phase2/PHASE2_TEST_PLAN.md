@@ -45,6 +45,17 @@ Verify that Hector SLAM (`hector_mapping`) operates reliably with the physical S
   - `/map` (`nav_msgs/OccupancyGrid`): 2D obstacle grid map used for trajectory validation and clearance checks.
   - TF Frames: Broadcasts `map` $\to$ `odom` $\to$ `base_link` without requiring external wheel odometry.
 
+### Hector SLAM: Advantages & Disadvantages Matrix
+
+| Category | Advantages (Pros) | Disadvantages & Limitations (Cons) | Mitigation in ASTRA AirMouse |
+|---|---|---|---|
+| **Odometry Dependency** | **Zero Odometry Needed**: Performs scan matching directly into the multi-resolution map; runs without wheel encoders or IMU initialization. | Requires high scan rate ($\ge 5\text{ Hz}$) to prevent scan matching divergence. | RPLiDAR A2 operates at $5.5\text{ – }7.5\text{ Hz}$ continuous streaming. |
+| **Compute Footprint** | **Ultra-Lightweight**: Gauss-Newton optimization takes only $\sim 6.8\text{ – }13.3\text{ ms / sweep}$ on companion CPU ($< 15\%$ CPU load). | Uses 2D grid representation rather than full 3D point cloud kd-trees. | Leaves CPU/GPU headroom for YOLO object detection and FUEL path planning. |
+| **Occupancy Mapping** | **Direct 2D Grid Map**: Generates `/map` (`nav_msgs/OccupancyGrid`) natively with zero post-processing. | Fixed map resolution (e.g., $0.05\text{ m/cell}$) requires pre-allocating arena grid dimensions. | Configured for a $20.0\text{ m} \times 20.0\text{ m}$ arena matrix ($400\times 400$ cells). |
+| **Degrees of Freedom (DoF)** | **Robust Planar Tracking**: High accuracy in $X, Y, \text{yaw}$ with analytical spatial gradients $\nabla M(p)$. | **2D Only**: Cannot estimate altitude ($Z$), roll, or pitch from 2D horizontal laser sweeps. | Altitude ($Z$) is provided by 1D TFmini Rangefinder / Baro; attitude by Pixhawk IMU/EKF2 in `relay_odometry.py`. |
+| **Vehicle Attitude Dynamics** | **Independent of Pitch/Roll IMU Noise**: SLAM scan matching is not corrupted by high-frequency motor vibrations. | Extreme vehicle tilt ($> 20^\circ$) causes horizontal scan plane to intersect floor/ceiling. | PX4 flight velocity and tilt angle are capped in autonomous exploration cruise mode. |
+| **Environment Geometry** | **Continuous Map Interpolation**: Bilinear grid interpolation provides sub-grid precision and smooth gradients. | Long featureless corridors may cause longitudinal drift due to lack of perpendicular features. | Relayed through PX4 EKF2 and anchored at launch pad origin to prevent unconstrained drift. |
+
 ### Hardware Test Procedure
 
 ```bash
